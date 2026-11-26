@@ -8,8 +8,8 @@
 # explicit ids) needs the orchestrator, then prints, per CONTRACT.md, one pair per target:
 #   EVENT <kind> <target-id> <unix-ts> <one-line detail>
 #   NEXT <exact shell command to run>
-# and exits 0. Kinds, highest priority first: approval question failed limit done idle stalled
-# unreviewed drift (plus watcher-lost/approved passed through from other modules).
+# and exits 0. Kinds, highest priority first: approval question failed poll-failed limit done idle
+# stalled unreviewed drift (plus watcher-lost/approved passed through from other modules).
 #
 # Durable, replayable: every observation that is an event is appended to the append-only
 # $OSRC_HOME/lanes/events.jsonl (by supervise itself and by the heartbeat beacon on each tick).
@@ -523,7 +523,7 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   { if [ "$3" = - ]; then tail -c +"$(( $2 + 1 ))" "$1"; else tail -c +"$(( $2 + 1 ))" "$1" | head -c "$(( $3 - $2 ))"; fi; } 2>/dev/null \
   | jq -r --argjson set "$4" --arg all "${_sv_all:-0}" --arg owner "$5" --argjson since "$(( $(_sv_now) - 86400 ))" '
     select(type=="object" and .ts >= $since and ($all == "1" or ($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
-    | ({approval:1,"approval-not-landed":1,question:2,failed:3,limit:4,"disk-paused":4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
+    | ({approval:1,"approval-not-landed":1,question:2,failed:3,"poll-failed":3,limit:4,"disk-paused":4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
       [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
        ((.id // "\(.ts)/\(.kind)/\(.target)/\(.detail)") | f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT
@@ -688,6 +688,9 @@ $w" ;;
     if [ -n "$sid" ]; then mkdir -p "$OSRC_HOME/owners/$sid" && : > "$OSRC_HOME/owners/$sid/$wid"
     else case " $ids " in *" $wid "*) ;; *) ids="$ids $wid" ;; esac; fi
   done <<< "$watches"
+  # Poll from $OSRC_HOME, never the inherited cwd: a start folder deleted later (a removed
+  # worktree) made every git call fail and a finished lane read as stalled (lib/remote.sh).
+  type _osrc_cwd_safe >/dev/null 2>&1 && _osrc_cwd_safe force
   rearm="$SCRIPT_PATH supervise$scope${auto:+ --auto $auto}$([ "$loop" = 0 ] || printf ' --loop')${ids}"
   if [ "$_sv_all" = 0 ] && [ -z "$sid" ] && [ -z "$ids" ]; then
     _sv_fail "no Claude Code session id (CLAUDE_CODE_SESSION_ID unset) and no target ids" "$SCRIPT_PATH supervise --session <your-session-id>"

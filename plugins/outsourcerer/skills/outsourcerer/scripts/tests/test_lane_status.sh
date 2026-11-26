@@ -57,7 +57,7 @@ OSRC_NOW=1000000; export OSRC_NOW
 printf 'gh: error connecting to api.github.com\n' > "$GH_ERR"
 add c2
 for _ in 1 2 3 4 5 6; do cmd_lane poll c2; done
-out="$(osrc_remote_events 2>&1)"; grep -q 'EVENT failed c2 .*polling failed' <<<"$out" && ok "real network errors still surface" || bad "network error hidden"
+out="$(osrc_remote_events 2>&1)"; grep -q 'EVENT poll-failed c2 .*(net, ' <<<"$out" && ok "real network errors still surface (poll-failed)" || bad "network error hidden"
 
 # Evidence-based ls: a lane that pushed once, then went quiet past the stall timeout, is stale not live.
 rm -f "$GH_ERR"

@@ -30,9 +30,14 @@ lane ls | show <id> | poll [id] | rm <id> | events
   enqueues; fail, or a runner that died without a result, means `EVENT failed` and no review is spent.
   **The command executes code pushed by the remote lane, on this machine, with your own rights and no
   sandbox.** Only set it on lanes whose branch you would run locally.
-- **Failure is loud**: `gh` auth failure or rate limit emits `EVENT failed` with the reason on the first
-  poll; other poll errors after `OSRC_REMOTE_ERR_MAX` (5) in a row; a deleted branch the lane once had.
-- `stalled`: no push for `OSRC_REMOTE_STALL` minutes (90) while the lane is live.
+- **Failure is loud**: a poll that fails emits `EVENT poll-failed <id> <reason>` with a NEXT naming the
+  fix, once per reason per failure episode: `gh` auth failure, rate limit or a lost working directory
+  on the first poll, other errors after `OSRC_REMOTE_ERR_MAX` (5) in a row. `lane ls` and Mission
+  Control show the lane as "can't check" with the reason. A deleted branch the lane once had is `EVENT failed`.
+- Pollers never run git from the inherited folder: `supervise` moves to `$OSRC_HOME` at start, and the
+  poll, events, review and hub entry points move there when the current folder was deleted.
+- `stalled`: no push for `OSRC_REMOTE_STALL` minutes (90) while the lane is live and its last poll
+  succeeded (stale data is "can't check", never stalled).
 - `failed ... never started`: a lane that never pushed its branch within `OSRC_REMOTE_NEVER_START` minutes (45), reported once. Until then a missing branch (gh HTTP 404/422) is "starting", not an error. `lane ls` shows `starting` / `stale` from evidence (age, push), not the cached `live`.
 
 ## Review queue (one reviewer, one item in flight)

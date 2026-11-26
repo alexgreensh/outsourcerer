@@ -225,7 +225,7 @@ section > h2 { margin: 0; font-size: 1.5rem; font-weight: 600; text-wrap: balanc
 .s-merged, .s-done { background: var(--up-bg); color: var(--up); border-color: var(--up); }
 .s-review { background: var(--hi-soft); }
 .s-building { background: var(--thumb); }
-.s-blocked, .s-failed { background: var(--down-bg); color: var(--down); border-color: var(--down); } .s-unverified, .s-paused { border-style: dashed; }
+.s-blocked, .s-failed { background: var(--down-bg); color: var(--down); border-color: var(--down); } .s-unverified, .s-paused, .s-cant { border-style: dashed; }
 .decs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 1100px) { .themes, .decs { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 700px) { .main { padding-left: 16px; padding-right: max(16px, env(safe-area-inset-right, 0px)); } }
@@ -650,9 +650,9 @@ a.pill svg { width: 13px; height: 13px; }
     sv.setAttribute('aria-label', L[0]);
     const pa = document.createElementNS(NS, 'path'); pa.setAttribute('d', L[1]); pa.setAttribute('fill', 'currentColor'); sv.appendChild(pa); return sv;
   }
-  const STATUS_ICON = { merged: 'check', done: 'check', shipped: 'check', review: 'wrench', fixing: 'wrench', building: 'hammer', blocked: 'octagon-x', failed: 'octagon-x', unverified: 'hand', waiting: 'hand', paused: 'pause' };
-  const chipCls = (s) => 's-' + String(s || 'building').toLowerCase().split(' ')[0];
-  const chip = (s) => { const k = String(s || 'building').toLowerCase().split(' ')[0]; const e = el('span', 'chip ' + chipCls(s)); e.append(ic(STATUS_ICON[k] || 'hammer'), document.createTextNode(s || 'Building')); return e; };
+  const STATUS_ICON = { merged: 'check', done: 'check', shipped: 'check', review: 'wrench', fixing: 'wrench', building: 'hammer', blocked: 'octagon-x', failed: 'octagon-x', unverified: 'hand', cant: 'hand', waiting: 'hand', paused: 'pause' };
+  const chipKey = (s) => String(s || 'building').toLowerCase().split(' ')[0].replace(/[^a-z-]/g, ''), chipCls = (s) => 's-' + chipKey(s);
+  const chip = (s) => { const k = chipKey(s); const e = el('span', 'chip ' + chipCls(s)); e.append(ic(STATUS_ICON[k] || 'hammer'), document.createTextNode(s || 'Building')); return e; };
   const WEIGHTS = { Critical: ['w-crit', 'octagon-alert', 'Critical: privacy, data safety, or whether we can ship.'], High: ['w-high', 'triangle-alert', 'High: users feel it directly.'], Medium: ['w-med', '', 'Medium: shapes how a feature works.'], Low: ['w-low', '', 'Low: internal, easy to change later.'] };
   const AFF = { 'Privacy': 'lock', 'Cost': 'coins', 'Release date': 'calendar', 'Sync': 'refresh-cw', 'Cloud search': 'cloud', 'Cowork': 'users', 'Release confidence': 'shield-check' };
   function tags(d) {

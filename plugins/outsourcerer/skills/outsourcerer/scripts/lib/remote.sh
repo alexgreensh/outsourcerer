@@ -117,6 +117,18 @@ except subprocess.TimeoutExpired:
 PY
 }
 
+# A git or gh call made from a directory that was deleted (a removed worktree the watcher was
+# started in) dies with "Unable to read current working directory": every poll fails and the lane
+# record freezes. Poll, events, review and hub entry points move to $OSRC_HOME (else /) whenever
+# the inherited cwd is gone or replaced; a working cwd is left alone (CLI repo resolution uses it).
+# `force` moves there even from a working cwd (supervise, a long-lived poller). A relative OSRC_HOME
+# is left alone: moving would break every "$OSRC_HOME/..." path.
+_osrc_cwd_safe() { # [force]
+  case "${OSRC_HOME:-}" in /*|[A-Za-z]:[/\\]*) ;; *) return 0 ;; esac
+  [ "${1:-}" != force ] && [ -d "$PWD" ] && [ "$PWD" -ef . ] 2>/dev/null && return 0
+  mkdir -p "$OSRC_HOME" 2>/dev/null; cd "$OSRC_HOME" 2>/dev/null || cd /
+}
+
 # ---- repo resolution --------------------------------------------------------------------------
 # Prints "<transport>\t<url-or-owner/name>". transport git = local path or any git URL, gh = GitHub
 # owner/name polled through `gh api` (git fetches then use https://github.com/<o>/<n>.git).
@@ -172,6 +184,7 @@ _osrc_gh_err_kind() { # <stderr-text> -> auth|rate|missing|net
 # rate limited.
 _osrc_lane_poll() {
   local id="$1" force="${2:-}" f now poll last lk
+  _osrc_cwd_safe
   f="$(_osrc_lane_json "$id")"; [ -f "$f" ] || return 1
   lk="$OSRC_HOME/remote/$id.lock"
   _osrc_lock "$lk" || return 0
@@ -226,6 +239,7 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
   done
   # success path: clear error state, record the poll
   _osrc_jq_set "$f" --argjson now "$now" '.last_poll_ts=$now | .last_ok_ts=$now | .err_count=0 | .err_kind="" | .err_msg=""'
+  rm -f "$OSRC_HOME/remote/.ev/$id"/pollfail* 2>/dev/null   # a later failure is a new episode: report it again
   if [ -z "$head" ]; then
     # branch absent: only a failure if we had seen it before (deleted), otherwise not pushed yet
     if [ "$(jq -r '.seen_branch' "$f")" = true ]; then
@@ -340,11 +354,13 @@ _osrc_marker_hit_local() { # <subject> <marker>
   return 1
 }
 
-# Poll failure bookkeeping. auth and rate-limit are reported on the FIRST occurrence (silence is the
-# failure we are fixing); other errors become a `failed` event after OSRC_REMOTE_ERR_MAX in a row.
+# Poll failure bookkeeping. auth, rate-limit and a lost working directory (cwd) are reported on the
+# FIRST occurrence (silence is the failure we are fixing); other errors after OSRC_REMOTE_ERR_MAX in
+# a row. Either way the event is `poll-failed`, and the lane is never called stalled on stale data.
 _osrc_lane_poll_err() { # <id> <json> <now> <kind> <msg>
   local f="$2" now="$3" kind="$4" msg
   msg="$(printf '%s' "$5" | tr '\n\r' '  ' | cut -c1-200)"
+  case "$msg" in *"Unable to read current working directory"*) kind=cwd ;; esac
   _osrc_jq_set "$f" --argjson now "$now" --arg k "$kind" --arg m "$msg" \
     '.last_poll_ts=$now | .err_count=((.err_count // 0) + 1) | .err_kind=$k | .err_msg=$m'
 }
@@ -421,14 +437,20 @@ osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no net
   if _osrc_remote_rec "$f"; then _osrc_remote_state_rec "$1"; else printf failed; fi   # unreadable record
 }
 # The lane file in ONE jq (it was ~14 per lane per pass, also when the poll was throttled): sets _RR_*.
-# \037 separates; tabs and newlines inside values become spaces.
-_osrc_remote_rec() { # <json>
-  IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
-    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref _RR_rrc < <(jq -r 'def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");
-    [(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
+# \037 separates; tabs and newlines inside values become spaces. _OSRC_RR_DEF/_OSRC_RR_ROW are also
+# run over many lane files in one jq (lib/owner_state.sh, the stop guard's batch).
+_OSRC_RR_DEF='def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");'
+_OSRC_RR_ROW='[(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
      (.check.rc // 0), (.proof_back // ""), (.head_ready // false), (.ready_head // ""), (.poll_branch // .branch // ""),
      (.head_msg // ""), (.seen_branch // false), (.created_ts // 0), (.last_poll_ts // 0), (.last_push_ts // .created_ts // 0),
-     (.session_ref // ""), (.result_rc // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
+     (.session_ref // ""), (.result_rc // "")] | map(c) | join("\u001f")'
+_osrc_remote_rec() { # <json>
+  local l; IFS= read -r l < <(jq -r "$_OSRC_RR_DEF $_OSRC_RR_ROW" "$1" 2>/dev/null) || return 1
+  _osrc_remote_rec_set "$l"
+}
+_osrc_remote_rec_set() { # <one \037-separated record line>
+  IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
+    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref _RR_rrc <<<"$1"
   _RR_errn="${_RR_errn:-0}"; _RR_crc="${_RR_crc:-0}"
   case "$_RR_created" in ''|*[!0-9]*) _RR_created=0 ;; esac; case "$_RR_lastpush" in ''|*[!0-9]*) _RR_lastpush="$_RR_created" ;; esac
 }
@@ -461,6 +483,7 @@ _osrc_remote_ids() { local p; for p in "$OSRC_HOME"/remote/*.json; do [ -f "$p" 
 # Prints EVENT/NEXT pairs for every registered remote lane, plus the review queue's. Never blocks.
 osrc_remote_events() {
   have jq || return 0
+  _osrc_cwd_safe
   local id f now stall renotify head sha7 st last_move vts errn errk
   now="$(_osrc_now)"
   stall="$(_osrc_mins "${OSRC_REMOTE_STALL:-90}")"
@@ -473,16 +496,11 @@ osrc_remote_events() {
     if [ $(( now - _RR_lastpoll )) -lt "${OSRC_REMOTE_POLL_SECS:-60}" ] && [ "$_RR_cstate" != running ]; then :
     else _osrc_lane_poll "$id" || true; _osrc_remote_rec_or_say "$id" "$f" "$renotify" || continue; fi
     head="$_RR_head"; sha7="${head:0:7}"
-    # poll trouble: auth / rate limit at once, anything else after N consecutive failures
+    # poll trouble: auth / rate limit / lost cwd at once, anything else after N consecutive failures;
+    # once per reason per failure episode (a good poll clears the keys)
     errn="$_RR_errn"; errk="$_RR_errk"
-    if [ "$errn" -gt 0 ] 2>/dev/null && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
-      if _osrc_ev_due "$id" "pollerr:$errk" "$renotify"; then
-        case "$errk" in
-          auth) _osrc_emit failed "$id" "gh/git auth failure polling $_RR_pbranch: $(jq -r .err_msg "$f")" "gh auth status" ;;
-          rate) _osrc_emit failed "$id" "rate limited polling $_RR_pbranch: $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
-          *) _osrc_emit failed "$id" "polling failed ${errn}x ($errk): $(jq -r .err_msg "$f")" "$(_osrc_self) lane poll $id" ;;
-        esac
-      fi
+    if [ "$errn" -gt 0 ] 2>/dev/null && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errk" = cwd ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
+      _osrc_lane_poll_failed "$id" "$f" "$errn" "$errk"
     fi
     if [ "$_RR_del" = true ] && _osrc_ev_due "$id" deleted "$renotify"; then
       _osrc_emit failed "$id" "branch $_RR_pbranch was deleted from the remote" "$(_osrc_self) lane show $id"
@@ -521,7 +539,8 @@ osrc_remote_events() {
         _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
       fi
     fi
-    if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ] \
+    # a lane whose last poll failed is "can't check" (poll-failed above), never stalled on stale data
+    if [ "$st" = live ] && [ "$errn" = 0 ] && [ -n "$stall" ] && [ "$stall" -gt 0 ] \
        && { [ -n "$head" ] || [ "$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")" -le 0 ]; }; then
       last_move="$_RR_lastpush"; vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
       [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
@@ -533,6 +552,19 @@ osrc_remote_events() {
   type osrc_review_events >/dev/null 2>&1 && osrc_review_events
   type osrc_proof_events >/dev/null 2>&1 && osrc_proof_events   # lib/proof.sh: lanes stopped by a pin mismatch
   return 0
+}
+
+_osrc_lane_poll_failed() { # <id> <json> <err-count> <kind>: EVENT poll-failed, NEXT names the fix
+  local id="$1" f="$2" n="$3" k="$4" m nx
+  m="$(jq -r '.err_msg // ""' "$f")"
+  _osrc_ev_due "$id" "pollfail:$k:$(printf '%s' "$m" | tr -d '0-9' | cksum | awk '{print $1}')" 0 || return 0
+  case "$k" in
+    auth) nx="gh auth status" ;;
+    rate) nx="gh api rate_limit --jq .rate" ;;
+    cwd) nx="cd $(printf '%q' "$OSRC_HOME") && $(_osrc_self) lane poll $id   # the poller's folder was deleted: run it from one that exists" ;;
+    *) nx="$(_osrc_self) lane poll $id" ;;
+  esac
+  _osrc_emit poll-failed "$id" "can't check $_RR_pbranch ($k, ${n}x): $m" "$nx"
 }
 
 # Last sign the lane moved: its last push or its last review verdict, whichever is later. ONE rule
@@ -566,6 +598,9 @@ _osrc_lane_status() { # <id>
   local id="$1" f st now head last stall
   f="$(_osrc_lane_json "$id")"; st="$(osrc_remote_state "$id")"; now="$(_osrc_now)"
   head="$(jq -r '.head // ""' "$f")"
+  if [ "$st" = live ] && [ "$(jq -r '.err_count // 0' "$f")" != 0 ]; then
+    printf "can't check\t%s" "$(jq -r '"\(.err_kind // "net"): \(.err_msg // "")"' "$f" | cut -c1-120)"; return 0
+  fi
   if [ "$st" = live ]; then
     stall="$(_osrc_mins "${OSRC_REMOTE_STALL:-90}")"
     if [ -z "$head" ]; then

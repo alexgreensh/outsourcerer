@@ -433,6 +433,7 @@ _osrc_review_idle_retire() { # <session> <now> <screen> <queued> <inflight>
 # ---- events ------------------------------------------------------------------------------------
 osrc_review_events() {
   have jq || return 0
+  type _osrc_cwd_safe >/dev/null 2>&1 && _osrc_cwd_safe
   [ -d "$OSRC_HOME/review/items" ] || [ -n "$(_osrc_review_reviewer)" ] || return 0
   local s now un renotify rv_renotify p id lane sha7 st inflight="" nq=0 oldest="" scr rot send_grace v nextc stale   # unreviewed: first at 15 min, then every 15
   now="$(_osrc_now)"; s="$(_osrc_review_reviewer)"

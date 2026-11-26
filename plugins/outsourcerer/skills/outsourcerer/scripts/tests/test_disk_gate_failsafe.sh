@@ -60,11 +60,19 @@ grep -q 'gate-rc=0' <<<"$g" && ok "the code admits one command when df never par
 g="$(osrc "$H" '_osrc_disk_gate probe; echo gate-rc=$?')"
 ! grep -q 'gate-rc=0' <<<"$g" && ok "factory probe refuses when df is unreadable" || bad "probe passed: $g"
 
+echo "=== rounding: the launch refusal and disk status print the same free figure ==="
+H="$(home rnd)"; setfree 9332327   # 8.9G: an integer GB formatter said "8GB" while disk status said 8.9G
+g="$(osrc "$H" '_osrc_disk_gate fg; echo gate-rc=$?')"
+s="$(osrc "$H" '_osrc_disk_cmd status' | head -1)"
+gf="$(sed -n 's/.*free disk is \([^ ]*\) .*/\1/p' <<<"$g" | head -1)"; sf="$(sed -n 's/.*(free \([^/]*\)\/.*/\1/p' <<<"$s" | head -1)"
+[ -n "$gf" ] && [ "$gf" = "$sf" ] && [ "$gf" = 8.9G ] && ok "refusal and disk status agree: $gf" || bad "refusal '$gf' vs status '$sf' [$g] [$s]"
+grep -q '< 10.0G launch floor' <<<"$g" && ok "the floor in the refusal uses the same formatter" || bad "floor text: $g"
+
 echo "=== EH F4: broken floor computation keeps a 1GB critical floor ==="
 H="$(home f4)"; setfree 524288
 g="$(osrc "$H" '_osrc_disk_floors_kb() { echo broken; }; _osrc_disk_gate fg; echo gate-rc=$?')"
 c="$(code_of "$g")"
-grep -q 'critical floor (1GB)' <<<"$g" && ok "512MB free with broken floors hits the 1GB critical floor" || bad "critical floor gone: $g"
+grep -q 'critical floor (1.0G)' <<<"$g" && ok "512MB free with broken floors hits the 1GB critical floor" || bad "critical floor gone: $g"
 g="$(OSRC_DISK_OK=deadbeef osrc "$H" 'printf "deadbeef %s\n" "$(( $(date +%s) + 900 ))" > "$OSRC_HOME/disk-policy/override.code"
   _osrc_disk_floors_kb() { echo broken; }; _osrc_disk_gate fg; echo gate-rc=$?')"
 ! grep -q 'gate-rc=0' <<<"$g" && ok "a valid code cannot pass 512MB free with broken floors" || bad "override admitted at 512MB: $g"

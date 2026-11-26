@@ -119,8 +119,9 @@ cmd_stop_guard() {
   dir="$OSRC_HOME/owners/$sid"
   [ -d "$dir" ] || return 0
   type _ws_note_session >/dev/null 2>&1 && _ws_note_session "$sid" "$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
-  for id in $(ls -1 "$dir" 2>/dev/null); do
-    state="$(_owned_live_state "$id" 2>/dev/null)"
+  local f ids=""; for f in "$dir"/*; do [ -f "$f" ] && ids="$ids ${f##*/}"; done
+  while read -r id state <&3; do   # every owned marker in one batch (lib/owner_state.sh); fd 3 so no body command eats the list
+    [ -n "$id" ] || continue
     case "$state" in
       done|gone)
         # Log the terminal event BEFORE the marker goes, tagged with this owner, so the next
@@ -139,7 +140,9 @@ cmd_stop_guard() {
       idle) if _sv_idle_owed "$id"; then need="$need $id"; else idle="$idle $id"; fi ;;
       *) need="$need $id" ;;
     esac
-  done
+  done 3<<EOF_IDS
+$(_owned_live_states $ids 2>/dev/null)
+EOF_IDS
   if [ -z "$need" ]; then
     rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
     rmdir "$dir" 2>/dev/null
