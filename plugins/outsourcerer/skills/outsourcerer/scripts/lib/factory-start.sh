@@ -15,7 +15,8 @@
 # with default= and until= goes ahead with the default at the deadline unless risk= is
 # irreversible/paid/publish. The default `check` is the repo profile's (lib/factory-parallel.sh).
 # Default: one `plan run --once` pass, which launches the first wave and returns; --run drives the
-# plan to the end. A rerun reuses the plan and skips keys that are already task titles in it.
+# plan to the end. A rerun reuses the plan and skips keys that are already task titles in it; a line
+# that changed since its task was added is refused (the plan would silently run the old spec).
 
 _osrc_fs_usage() {
   echo 'usage: plan start <plan> <tasks-file|-> [--goal "..."] [--max-parallel N] [--run] [--dry-run]'
@@ -35,6 +36,9 @@ _osrc_fs_lookup() {
   local w
   for w in $1; do case "$w" in "$2="*) printf '%s' "${w#"$2="}"; return 0 ;; esac; done
 }
+
+# _osrc_fs_linehash <fields...> -> one checksum of a parsed task line (recorded on the task as start_line).
+_osrc_fs_linehash() { printf '%s\036' "$@" | cksum | tr ' ' _; }
 
 # _osrc_fs_trim <text> -> without leading and trailing blanks.
 _osrc_fs_trim() { local v="$1"; v="${v#"${v%%[![:space:]]*}"}"; printf '%s' "${v%"${v##*[![:space:]]}"}"; }
@@ -140,7 +144,20 @@ cmd_plan_start() {
       'length == 0 or any(.[]; .title as $t | $ks | index($t))' >/dev/null 2>&1 \
       || die "plan start: plan '$plan' already exists and none of its tasks are in $file. Pick a new plan name (or add tasks with task add)."
     [ -z "$goal" ] || echo "plan '$plan' exists, so --goal is ignored (the plan keeps its goal)."
-    reuse=1; echo "plan '$plan' exists; tasks already in it are kept, the rest are added."
+    reuse=1
+    # Before anything is added: a line edited since its task was added would be skipped and the old
+    # spec would run. Refuse and name them (tasks added before start_line existed are not compared).
+    local changed="" old
+    while IFS="$(printf '\036')" read -r key prompt after files extra hold; do
+      tid="$(_task_list "$plan" | _osrc_fp_jq -r --arg k "$key" '[.[] | select(.title == $k)] | first | .id // empty')"
+      [ -n "$tid" ] || continue
+      old="$(_task_get "$plan" "$tid" | _osrc_fp_jq -r '.start_line // ""')"
+      [ -z "$old" ] || [ "$old" = "$(_osrc_fs_linehash "$key" "$prompt" "$after" "$files" "$extra" "$hold")" ] || changed="$changed '$key' ($tid)"
+    done <<EOF
+$rows
+EOF
+    [ -z "$changed" ] || die "plan start: these lines changed since their tasks were added:$changed. The plan keeps the first version of each task; change it with the task commands, or start the edited list under a new plan name."
+    echo "plan '$plan' exists; tasks already in it are kept, the rest are added."
   else _plan_cli_new "$plan" ${goal:+--goal "$goal"} >/dev/null || return 1; fi
   us="$(printf '\037')"
   while IFS="$(printf '\036')" read -r key prompt after files extra hold; do
@@ -158,6 +175,7 @@ cmd_plan_start() {
       ${args[@]+"${args[@]}"} 2>&1)" || die "plan start: could not add '$key': $(printf '%s' "$out" | tail -1). Rerun the same list to finish the plan."
     tid="$(printf '%s\n' "$out" | grep -E '^t[0-9]+$' | head -1)"
     [ -n "$tid" ] || die "plan start: '$key' was added but no task id came back: $out"
+    _task_update "$plan" "$tid" '.start_line = $h' --arg h "$(_osrc_fs_linehash "$key" "$prompt" "$after" "$files" "$extra" "$hold")" >/dev/null 2>&1
     map="$map$key=$tid "
     # The task is already held (--hold); this adds its default, deadline and risk. On failure it stays
     # held for the captain, which is the safe side.

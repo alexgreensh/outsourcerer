@@ -136,5 +136,17 @@ if on F57; then
   done
 fi
 
+if on F58; then
+  # A rerun with an edited line for an existing task must not silently keep the old spec.
+  printf 'a | do a\nb | do b | after=a\n' > "$TMP/l58"
+  start p58 "$TMP/l58" >/dev/null
+  o="$(start p58 "$TMP/l58")"; rc1=$?
+  printf 'a | do a, but differently\nb | do b | after=a\n' > "$TMP/l58"
+  o2="$(start p58 "$TMP/l58")"; rc2=$?
+  [ "$rc1" = 0 ] && ok "F58: rerunning an unchanged list is fine" || bad "F58: unchanged rerun rc=$rc1: $o"
+  [ "$rc2" != 0 ] && case "$o2" in *changed*"'a'"*) true ;; *) false ;; esac && [ "$(_task_list p58 | jq -r '.[] | select(.title == "a") | .prompt')" = "do a" ] \
+    && ok "F58: an edited line for an existing task is refused and named" || bad "F58: edited rerun rc=$rc2: $o2"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
