@@ -307,7 +307,7 @@ _osrc_hub_single_flight() {
       { while sleep $(( stale / 3 + 1 )) && [ "$(cat "$lk/pid" 2>/dev/null)" = "$me" ] && kill -0 "$me" 2>/dev/null; do
           touch "$lk" 2>/dev/null; done; } </dev/null >/dev/null 2>&1 & beat=$!
       "$@" > "$out.$me"; rc=$?
-      kill "$beat" 2>/dev/null
+      kill "$beat" 2>/dev/null; wait "$beat" 2>/dev/null   # reap it, or bash 3.2 prints "Terminated" into the export
       [ "$rc" = 0 ] && [ -s "$out.$me" ] && mv -f "$out.$me" "$out" 2>/dev/null
       [ "$(cat "$lk/pid" 2>/dev/null)" = "$me" ] && rm -rf "$lk" 2>/dev/null   # a lock taken over is not ours
       if [ -f "$out.$me" ]; then cat "$out.$me"; rm -f "$out.$me"; else cat "$out"; fi

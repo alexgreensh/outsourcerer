@@ -55,7 +55,7 @@ o="$(osrc "$(home f22)" "_osrc_hub_derive '[{\"id\":\"c\",\"short\":\"ask\",\"st
 
 echo "=== F26: supervise --loop that cannot write its loop marker says so ==="
 H="$(home f26)"; mkdir -p "$H/supervise"; : > "$H/supervise/sess-loop"   # a file where the session dir goes
-o="$(OSRC_CARD_GUARD=0 CLAUDE_CODE_SESSION_ID=sess-loop timeout 60 bash -c 'OSRC_HOME="$1" OSRC_SOURCED=1; . "$0" >/dev/null 2>&1; cmd_supervise --session sess-loop --loop; echo "rc=$?"' "$SRC" "$H" 2>&1)"
+o="$(OSRC_CARD_GUARD=0 CLAUDE_CODE_SESSION_ID=sess-loop perl -e 'alarm 60; exec @ARGV' bash -c 'OSRC_HOME="$1" OSRC_SOURCED=1; . "$0" >/dev/null 2>&1; cmd_supervise --session sess-loop --loop; echo "rc=$?"' "$SRC" "$H" 2>&1)"
 grep -q '^EVENT failed supervise .*cannot write the loop marker' <<<"$o" && grep -q '^rc=2' <<<"$o" \
   && ok "EVENT failed supervise, rc 2" || bad "loop marker failure: $o"
 
