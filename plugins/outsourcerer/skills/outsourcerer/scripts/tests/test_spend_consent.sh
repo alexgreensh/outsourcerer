@@ -437,6 +437,7 @@ unset _r9noval
 # dispatch rows — without it a slow lane re-routes into a real tmux session the test cannot see.
 # ---------------------------------------------------------------------------------------------------
 PACAT="$TMP/postpromo"; mkdir -p "$PACAT/home" "$PACAT/osrc/catalogs"
+mkdir -p "$PACAT/osrc/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$PACAT/osrc/disk-policy/settings"
 cat > "$PACAT/osrc/catalogs/dv.raw.json" <<'EOF'
 {"families":[
  {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
@@ -491,6 +492,7 @@ esac
 # A3: post-promo MIXED catalog — paid -high, Free -max in one family. Cost outranks
 # effort end to end: no consent asked and the FREE -max is what launches.
 MCAT="$TMP/mixedcat"; mkdir -p "$MCAT/home" "$MCAT/osrc/catalogs"
+mkdir -p "$MCAT/osrc/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$MCAT/osrc/disk-policy/settings"
 cat > "$MCAT/osrc/catalogs/dv.raw.json" <<'EOF'
 {"families":[
  {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
