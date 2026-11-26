@@ -60,6 +60,7 @@ owner() { # <session> [status] -> an owner record that proves the owner existed
 
 echo "=== fixtures ==="
 R="$TMP/repo"; mkrepo "$R"
+git -C "$R" update-ref refs/remotes/origin/main HEAD   # main is pushed: a remote holds its commits
 
 # SAFE worktree+branch: tip == main HEAD, clean tree, an ignored node_modules
 # only (disposable cache -> does not block SAFE). Owner has a done job record.
@@ -409,11 +410,12 @@ git -C "$BR" update-ref refs/remotes/origin/feat "$FEAT"
   && ok "commit past a remote-held base is not preserved" || bad "post-base commit counted as preserved"
 git -C "$BR" worktree add -q "$BR/.outsourcerer/worktrees/wt-main" -b outsourcerer/wt-main main
 [ "$(bm "$BR" outsourcerer/wt-main)" = "rc=0" ] && ok "tip inside main stays preserved" || bad "main-contained tip lost"
-# Trunk-named repo, no remotes: another local branch holds the tip, so it is preserved.
+# Trunk-named repo, no remotes: another local branch holds the tip. The SAFE rule needs a remote or
+# a merged PR, so it is not SAFE; the user-typed `cleanup <id>` (--any-ref) accepts the local branch.
 RT="$TMP/repo-trunk"; mkdir -p "$RT"; ( cd "$RT" && git init -q -b trunk && printf 'a\n' > a && git add a && git commit -qm a && git branch w-trunk )
-trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk; echo "rc=$?"' _ "$RT" 2>&1)"
-[ "$(tail -1 <<<"$trk")" = "rc=0" ] \
-  && ok "tip still held by another local branch is preserved (no main-ish ref needed)" || bad "trunk-shaped repo cried wolf: $trk"
+trk="$(OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; _osrc_branch_merged "$1" w-trunk; echo "rc=$?"; _osrc_branch_merged "$1" w-trunk --any-ref; echo "rc=$?"' _ "$RT" 2>&1)"
+[ "$(tail -2 <<<"$trk" | tr '\n' ' ')" = "rc=1 rc=0 " ] \
+  && ok "a tip held only by a local branch: not SAFE, but cleanup <id> accepts it" || bad "trunk-shaped repo: $trk"
 # End to end: cleanup verdict and --apply for the local-only case (no remote ref holds the base).
 R3="$TMP/repo-base2"; mkrepo "$R3"
 git -C "$R3" checkout -qb feat; printf 'lo\n' > "$R3/lo.txt"; git -C "$R3" add lo.txt; git -C "$R3" commit -qm lo

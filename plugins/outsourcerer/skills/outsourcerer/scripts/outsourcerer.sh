@@ -10138,8 +10138,7 @@ _bg_launch() {
   # command substitution, where a `die` only kills the subshell (fake-success launch). Callers (cmd_bg /
   # cmd_fanout) MUST call _bg_cloud_preack in the parent shell BEFORE the substitution.
   _mkdir_private "$OSRC_JOBS" || true
-  # Disk-pressure gate (lib/cleanup.sh): runs before the job-dir claim so a refusal leaves nothing.
-  type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
+  _osrc_disk_gate job || die "disk gate not loaded; refusing launch"   # before the job-dir claim
   local id jd tries=0 _arm_rc=0 _bpid
   # Claim the job dir ATOMICALLY -- `mkdir` (no -p) fails if the dir already exists, so two
   # concurrent launches that mint the same id can never share one directory; regenerate on collision.
@@ -15227,8 +15226,7 @@ _failover_notice() {
 route_delegate() {
   if [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ "${_OSRC_PREFLIGHT_ACTIVE:-0}" != 1 ]; then local _OSRC_PREFLIGHT_ACTIVE=1; _osrc_route_dispatch "$@"; return $?; fi
   local tier="$1" verb="$2"; shift 2
-  # Disk-pressure gate: refuse new lane launches under the disk-policy floors (lib/cleanup.sh).
-  type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate
+  _osrc_disk_gate fg || die "disk gate not loaded; refusing launch"   # lib/cleanup.sh
   # Mutating verbs get the BUILD DISCIPLINE preamble (write early, don't over-explore). See _build_discipline.
   [ "$tier" = "auto" ] && export OSRC_BUILD_DISCIPLINE=0 || export OSRC_BUILD_DISCIPLINE=1
   # Recursion guard: a delegated model must NOT re-delegate (Sorcerer's-Apprentice fork bomb).
@@ -16909,7 +16907,7 @@ _winpty_session() {
 # ---- interactive tmux session (opt-in) ----
 session() {
   _validate_session_name
-  [ "${1:-}" = start ] && type _osrc_disk_gate >/dev/null 2>&1 && _osrc_disk_gate   # disk floors (lib/cleanup.sh), every platform
+  _osrc_disk_session_gate "$@" || die "disk gate not loaded; refusing launch"   # every platform
   if [ "$OSRC_PLATFORM" = "windows" ]; then
     _winpty_session "$@"
     return

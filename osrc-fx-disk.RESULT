@@ -1,0 +1,5 @@
+sha=1e0064b558f3a11984e8bb44054b91e50ef9eeef
+rc=1
+conformance.sh: 262 passed, 3 failed, 14 skipped (rc=1). The 3 failures (test_harness_isolation, test_vocab_hygiene, test_parity_insource_refresh) assume a non-root user and fail identically on the pinned base; this container runs as root.
+All disk/cleanup work is done and its suites are green: test_disk_gate_failsafe 52/52 (34 fail on base), test_disk_policy 94/94, test_cleanup_manifest 85/85, test_factory_flow 216/216.
+Code head commit: b78ba3a; the report/RESULT/READY commit follows it on cloud/osrc-fx-disk. Details: reports/osrc-fx-disk.md

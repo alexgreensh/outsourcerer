@@ -80,9 +80,10 @@ Drives a plan until it is finished or needs you. Each pass ("tick") does two thi
    `--max-parallel`, else `OSRC_FACTORY_PARALLEL`, else the repo profile's `parallel`, else 3 (2 on machines with
    4 cores or fewer, 1 on 2 or fewer); 1-16.
    - Resource gate, checked once per pass: a repo gate script (profile `gate` or `OSRC_FACTORY_GATE`: one path, no
-     arguments, run as `<gate> can-run`; exit 1 pauses with its first output line as the reason, any other failure
-     is ignored; a path that is not a file is ignored with one warning), then the launch disk gate (free disk under
-     `OSRC_DISK_MIN_GB`, 10, pauses until free disk is back over the floor, exactly as at launch: free space, `cleanup --apply`, or `cleanup --ack` for an ASK list; `OSRC_DISK_MIN_GB=0` turns it off), then
+     arguments, run as `<gate> can-run`; exit 0 goes, exit 1 pauses with its first output line as the reason, any
+     other exit or no answer within `OSRC_FACTORY_GATE_TIMEOUT` (30s) also pauses the pass, naming the rc; a path that
+     is not a file is ignored with one warning), then the launch disk gate (free disk under the launch floor,
+     max(10GB, 5% of the disk) unless `OSRC_DISK_MIN_GB` sets it, pauses until free disk is back over the floor, exactly as at launch: free space, `cleanup --apply`, or `cleanup --ack` for an ASK list; a factory pass never takes or mints the one-use override code; `OSRC_DISK_MIN_GB=0` turns it off), then
      1-minute load per core over `OSRC_FACTORY_LOAD_MAX` (2), then on macOS swap use over
      `OSRC_FACTORY_SWAP_MAX_PCT` (off by default: a healthy Mac sits at 90%+ because macOS grows swap on demand; set a percent to turn it on). The reason names
      the reading and the setting; 0 turns a check off. A paused pass starts nothing and fails nothing, and the

@@ -248,26 +248,42 @@ it, path under the manifest's recorded root (the age and open-file checks do not
 entries, which instead need a valid branch name and a resolvable repo). Worktrees additionally need a
 clean git status (untracked files count) and no ignored files other than a top-level
 `node_modules`, `.venv` or `__pycache__`; a branch must not be checked out in any worktree;
-worktrees and branches need their tip contained in one of the main-ish refs (`origin/HEAD`,
-`origin/main`, `origin/master`, `main`, `master`, `upstream/main`, `upstream/master`), in the
-recorded base commit (the `base_sha` the worktree was cut from) when a remote-tracking ref also
-holds that base, or in a merged PR whose head is that tip. A recorded base that no remote or
-main-ish ref holds is not preservation by itself: a worktree cut from a local-only branch stays
-ASK, because deleting its branch would drop the last ref to those commits. `cleanup <id>` applies
-the same test and refuses such a branch without `--force`, and also refuses a worktree whose live
-`HEAD` is not the recorded branch (for example detached after its branch was deleted). Fanout entries need
+a worktree's `git status` must succeed (a failing one is ASK, never "clean"); worktrees and branches
+are SAFE only when a remote or a merged PR really holds their commits: a remote-tracking ref
+(`refs/remotes/*`) contains the branch tip, or a merged PR's head is exactly that tip (a `gh pr list`
+that does not answer within `OSRC_CLEANUP_GH_TIMEOUT`, 15s, proves nothing). Another local branch or
+a tag is not enough, because it can be deleted the same way. The open-file check needs proof that
+`lsof` ran; when it cannot be proven (no `lsof`, a timeout, an unwritable `$OSRC_HOME`) the item is
+ASK. `cleanup <id>`, which the user types for one lane, refuses a branch whose tip no other ref at
+all (branch, remote or tag) holds without `--force`, and also refuses a worktree whose live `HEAD` is
+not the recorded branch (for example detached after its branch was deleted). Fanout entries need
 every member done or gone. Jobs, loops and autodetach logs are SAFE after a clean finish with the
 result collected; a clean finish whose result was never collected stays ASK at any age, and only a
 non-clean finish becomes SAFE past a 3-day TTL. Anything failing a check is ASK, shown, never
 deleted; `lib/cleanup.sh` is the authority when this summary and the code disagree.
 
-Disk gate: while free disk is below `OSRC_DISK_MIN_GB` (10), new lane launches (`bg`, routed
-delegations, `session start`) are refused unless there are ASK items and the current ASK list has
-been acknowledged (`cleanup --ack`). The gate decides from a live scan of the manifest, never from
+Disk gate (full rules: `jobs-and-safety.md`, "Disk pressure policy"): the launch floor scales with
+the disk, max(10GB, 5% of the volume holding `$OSRC_HOME`, capped at a quarter of a small volume),
+unless `OSRC_DISK_MIN_GB` in `$OSRC_HOME/disk-policy/settings` sets it. Below it, new lane launches
+(`bg`, routed delegations, `session start`, `session model`, `session control relaunch`, `session
+effort`) are refused unless there are ASK items and the current ASK list has been acknowledged
+(`cleanup --ack`), or the command carries the one-use code the refusal printed
+(`OSRC_DISK_OK=<code> <same command>`). Under the critical floor (0.5% of the volume, 1 to 4GB)
+nothing launches, not even with an ack or a code; a free-space reading that cannot be read also
+refuses (only the one-use code admits). While lanes run, a separate pause floor SIGSTOPs them
+instead of letting them fill the disk. The gate decides from a live scan of the manifest, never from
 `cleanup/state.json`: it still tries to refresh that file for the tick and other readers, but a
 failed write (disk full, unwritable directory) changes nothing, and the ack must match the ASK
 hash of the list as it is now. Any failed scan (including no `jq`) refuses with "the cleanup scan did not finish". With no ASK items it still refuses, and says whether SAFE items can be applied or the
-space is held outside Outsourcerer. `OSRC_DISK_MIN_GB=0` overrides.
+space is held outside Outsourcerer. `OSRC_DISK_MIN_GB=0` in the settings file turns the launch
+floor off; the critical floor stays.
+
+When lanes clean up: a finished lane's worktree and branch are never deleted on its own finish.
+They go (1) automatically, only while free space is under the pause floor: the disk monitor
+reclaims up to `OSRC_DISK_RECLAIM_MAX` (10) lanes per pressure episode that are proven merged and
+clean; (2) on `cleanup --apply`, every SAFE item; (3) for one lane, `cleanup <id>`. Remote lanes'
+branches are never deleted here: `cleanup` prints the exact `git push --delete` command, and `lane
+rm` untracks the lane.
 
 ## Hub export: the `team` field (L12)
 

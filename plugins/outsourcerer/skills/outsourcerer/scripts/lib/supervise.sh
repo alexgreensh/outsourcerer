@@ -274,6 +274,13 @@ _sv_observe() { # <id> <now> [src] [owner]
   local id="$1" now="$2" src="${3:-supervise}" owner="${4:-}" st code h out ev stall cap sig rf
   SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""; SV_STALL_START=""
   case "$id" in watch.*) _sv_observe_watch "$id" "$src" "$owner"; return 0 ;; esac
+  # Disk-paused (SIGSTOPped by lib/disk_policy.sh): its screen and log are frozen on purpose. Owed a
+  # waiter, no event (the disk policy wakes once), and the stall clock restarts so a resumed lane is
+  # never read as stalled for the time it spent paused.
+  if type _osrc_disk_target_paused >/dev/null 2>&1 && _osrc_disk_target_paused "$id"; then
+    _sv_state_read "$id"; SV_OUT=1; SV_PEND=1; SV_D="disk-paused: resumes when disk space returns ($SCRIPT_PATH disk status)"
+    SVS_CHANGED="$now"; SVS_CK=-; _sv_state_write "$id"; return 0
+  fi
   stall=$(( $(_sv_num "${OSRC_SUPERVISE_STALL:-}" 15) * 60 ))
   _sv_state_read "$id"
   if [ -f "$OSRC_HOME/remote/$id.json" ] && type osrc_remote_state >/dev/null 2>&1; then

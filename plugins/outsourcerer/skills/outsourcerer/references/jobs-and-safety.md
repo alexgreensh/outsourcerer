@@ -100,10 +100,18 @@ critical floor stays), `OSRC_DISK_PAUSE_GB`, `OSRC_DISK_CRITICAL_GB`, `OSRC_DISK
 are ignored, so an inherited export cannot open the gate.
 
 **Launch gate.** Below the critical floor nothing launches — not `cleanup --ack`, not an override.
+If free space cannot be read (`df -kP` fails or prints no number), the launch is refused with that
+reason; only the one-use code below admits it. If the floors themselves cannot be computed, the
+gate falls back to a flat 10GB launch floor and a 1GB critical floor. A disk-policy library that
+did not load refuses every launch. Gated: `bg`/`fanout` jobs, routed delegations, `session start`,
+`session model`, and `session control relaunch` / `session effort` (a new pane process, which is
+re-registered so it stays covered by pause-not-kill).
 Between critical and launch, an acknowledged ASK list passes (free space is re-read after the
 cleanup scan), and so does the explicit override: a refusal prints a one-use code, and
 `OSRC_DISK_OK=<code> <same command>` admits that one command. The code expires after 15 minutes,
-binds to the first process that uses it, is removed from the environment before any delegate
+binds to the first process that uses it (exclusive create of `override.taken.<code>`), is reused by
+later refusals while it is unclaimed with more than two minutes left (so one orchestrator's refusal
+never kills the code another just showed), is removed from the environment before any delegate
 runs, and is refused unless its use is appended to `disk-policy/override.log`. A `bg` or `fanout`
 job it launches gets a one-use admit token for the job's own gate, logged as `job-admit`.
 
@@ -115,16 +123,30 @@ started by `session start`. Under the pause floor it first writes a pause record
 then wakes the owner once per pressure episode (`disk-paused`, `disk-critical`, `disk-resumed`
 events), and only after that writes the pressure report (free space, swap, biggest dirs,
 reclaimable items by path) to `disk-policy/monitor.log` and reclaims merged lanes. Nothing is ever
-killed; a process whose identity cannot be proven is never signalled. When free space reaches the
-resume floor, or the monitor exits for any reason, every recorded process is `SIGCONT`ed. `fg` is
+killed; a process whose identity cannot be proven is never signalled. A lane that owns an
+Outsourcerer lock (`*.lock/owner` under `$OSRC_HOME`) or runs a git command younger than two minutes
+is not stopped that tick (a frozen lock holder would block every orchestrator); it is retried on the
+next tick. A stopped holder still passes `kill -0`, so lock breakers treat it as alive (paused),
+never break its lock. When free space reaches the resume floor every recorded process is
+`SIGCONT`ed. If free space cannot be read while lanes are paused, the monitor resumes them all and
+wakes once (`disk-unreadable`). The monitor runs detached in its own process group, so cancelling
+or timing out the command that started it does not touch it; when it exits (idle, `TERM`) it
+resumes the paused lanes only if free space is back at or above the pause floor (or `disk resume`
+holds); otherwise it leaves the records, and the next monitor (started by the heartbeat, the next
+launch or `disk status`) keeps them paused or resumes them. A `TERM` is handled at once, not after
+the 30s poll. Supervise and the watcher report a disk-paused lane as owed a waiter with no stall
+clock and no event, never as stalled. `fg` is
 typed into a tmux pane only when its shell holds the terminal at a job-control prompt; a lane still
 in the foreground just gets its terminal mode back and a redraw; any other pane is never typed into,
 stays parked and raises one `disk-parked-<session>` event. `outsourcerer disk resume` does the same
-immediately and, if it resumed anything, holds new pauses until space recovers or falls under the
-critical floor; `outsourcerer disk status` prints the report. A job's paused time is banked in
+immediately and, if anything was paused, first writes a hold (so a monitor tick racing it pauses
+nothing new) that blocks new pauses until space recovers or falls under the critical floor; `outsourcerer disk status` prints the report. A job's paused time is banked in
 `disk-paused-secs`, and the watchdog shifts its no-init, stall and hard-timeout clocks past it.
 
-**Automatic reclaim** removes only artifacts of a lane proven merged: the lane's worktree (its live
+**Automatic reclaim** runs only while free space is under the pause floor (once per pressure
+episode, up to `OSRC_DISK_RECLAIM_MAX` lanes); with normal free space nothing is deleted on its own,
+and `cleanup --apply` removes SAFE items. It removes only artifacts of a lane proven merged (a remote
+or a tip-matched merged PR holds the branch tip): the lane's worktree (its live
 branch must match the receipt, its HEAD be the proven commit, and `git status --ignored` be empty,
 so every file in it is tracked at a preserved commit) and its recorded branch (deleted only if the
 tip is still the proven commit and no worktree has it checked out). Scratch directories, ignored
