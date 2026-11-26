@@ -174,7 +174,8 @@ as laneB osrc_lease claim 'br/[id]/page.tsx' >/dev/null 2>&1; [ $? = 3 ] && ok "
 # Repo key is one spelling for the main checkout and a worktree.
 [ "$(_osrc_lease_repo "$R")" = "$(_osrc_lease_repo "$TMP/wt")" ] && ok "main checkout and worktree share a repo key" || bad "repo keys differ"
 # git printing an absolute common dir through a symlink (Git Bash style) still gives the physical key.
-k="$( git() { case "$*" in *--git-common-dir*) printf '%s\n' "$TMP/link/.git" ;; *) command git "$@" ;; esac; }; _osrc_lease_repo "$R" )"
+# Leading-paren case patterns: bash 3.2 ends a $(...) at the first bare pattern ')'.
+k="$( git() { case "$*" in (*--git-common-dir*) printf '%s\n' "$TMP/link/.git" ;; (*) command git "$@" ;; esac; }; _osrc_lease_repo "$R" )"
 [ "$k" = "$(cd "$R/.git" && pwd -P)" ] && ok "a symlinked absolute common dir gives the physical repo key" || bad "repo key through symlink: $k"
 
 # Two lanes claiming one path at the same instant: exactly one wins.
