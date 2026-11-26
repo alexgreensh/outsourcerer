@@ -77,7 +77,10 @@ _osrc_disk_resume_kb() { # <launch_kb> <pause_kb>
   if [ "$l" -gt "$p" ]; then printf '%s\n' "$(( p + (l - p) / 2 ))"; else printf '%s\n' "$(( p + 1048576 ))"; fi
 }
 
-_osrc_disk_fmt_kb() { # <kb> -> "6.2G" / "800M"
+# _osrc_disk_fmt_kb <kb> -> "6.2G" / "800M": THE disk size formatter. The launch refusal, cleanup and
+# `disk status` all print through it, so they never disagree (8.8G is 8.8G everywhere). Truncates:
+# a free-space figure is never rounded up past a floor.
+_osrc_disk_fmt_kb() {
   local k="${1:-0}" g
   case "$k" in ''|*[!0-9]*) k=0 ;; esac
   if [ "$k" -ge 1048576 ]; then g=$(( k * 10 / 1048576 )); printf '%s.%sG' "$(( g / 10 ))" "$(( g % 10 ))"
