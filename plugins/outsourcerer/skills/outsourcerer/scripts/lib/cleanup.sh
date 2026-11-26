@@ -774,7 +774,8 @@ _cmd_cleanup_target() {
   # another process) must be seen, or --force could destroy it. Fall back to the json only if the worktree
   # is already gone.
   if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    [ -n "$(git -C "$path" status --porcelain 2>/dev/null | head -1)" ] && dirty=true || dirty=false
+    # --untracked-files=all beats status.showUntrackedFiles=no (hidden untracked files are dirty).
+    [ -n "$(git -C "$path" status --porcelain --untracked-files=all 2>/dev/null)" ] && dirty=true || dirty=false
     ahead="$(git -C "$path" rev-list --count "${base:-HEAD}..HEAD" 2>/dev/null)"; ahead="${ahead:-0}"
   else
     dirty="$(jq -r '.dirty' "$wj")"; ahead="$(jq -r '.ahead // 0' "$wj")"
@@ -808,10 +809,25 @@ _cmd_cleanup_target() {
     echo "  integrate e.g.: git cherry-pick $branch   OR force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi
+  if [ "$force" != 1 ] && [ -z "$maindir" ]; then
+    echo "[outsourcerer] REFUSING to remove $target: its repository is gone, so what $path holds cannot be checked." >&2
+    echo "  inspect: ls -la \"$path\"; force-remove: outsourcerer cleanup $target --force" >&2
+    return 1
+  fi
   if [ -n "$maindir" ]; then
     # Keep the receipt when git cannot remove the worktree or branch: a silent rm -rf would
-    # leave the registration and branch behind with nothing left to find them by.
-    if ! git -C "$maindir" worktree remove --force "$path" 2>/dev/null; then
+    # leave the registration and branch behind with nothing left to find them by. Without
+    # --force the removal goes through _osrc_wt_remove: ignored or hidden files keep it.
+    local wrc=0
+    if [ "$force" = 1 ]; then git -C "$maindir" worktree remove --force "$path" 2>/dev/null || wrc=1
+    else _osrc_wt_remove "$maindir" "$path" "cleanup $target"; wrc=$?
+    fi
+    if [ "$wrc" = 2 ]; then
+      echo "[outsourcerer] REFUSING to remove $target: it holds untracked, ignored or hidden files that removal would delete." >&2
+      echo "  inspect: git -C \"$path\" status --ignored --untracked-files=all; force-remove: outsourcerer cleanup $target --force" >&2
+      return 1
+    fi
+    if [ "$wrc" != 0 ]; then
       echo "[outsourcerer] could not remove worktree $path via git; receipt kept so cleanup can be retried." >&2
       return 1
     fi
