@@ -178,5 +178,18 @@ if on F42; then
   rm -f "$OSRC_HOME"/hub/cache/scr/.dwant.*
 fi
 
+if on F43; then
+  # Two exports in a row with a slow check: contract: their detached workers must not run it together.
+  mkdir -p "$OSRC_HOME/hub/cache/scr"; : > "$TMP/f43.log"
+  ( unset OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
+    _osrc_hub_rawosrc_done_state() { echo "start $1" >> "$TMP/f43.log"; sleep 2; echo "end $1" >> "$TMP/f43.log"; }
+    for i in 1 2 3; do echo d43 > "$OSRC_HOME/hub/cache/scr/.dwant.$$"; _osrc_hub_scr_flush_wanted; sleep 0.3; done )
+  sleep 5
+  seq="$(tr '\n' ' ' < "$TMP/f43.log")"
+  case "$seq" in "start d43 end d43 "|"start d43 end d43 start d43 end d43 "*) ok "F43: one done-probe worker at a time ($seq)" ;;
+    *) no "F43: workers ran the same check together: $seq" ;; esac
+  [ ! -d "$OSRC_HOME/hub/cache/scr/.dlock" ] && ok "F43: the worker lock is released" || no "F43: lock left behind"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
