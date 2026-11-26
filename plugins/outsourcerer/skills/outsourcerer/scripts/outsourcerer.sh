@@ -277,7 +277,7 @@ unset OSRC_PROVIDER_INJECTED
 # parents pass it to children explicitly (bg -> preflight/job child). Every command entry
 # point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
 # display hint the gate never executes.
-unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_PREFLIGHT_PAIR
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -300,7 +300,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
-for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib; _osrc_spend_failclosed() { _osrc_spend_libs_ok 2>/dev/null && return 0; for _osrc_lib in ${_OSRC_SPEND_GATE_FNS:-_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate}; do eval "$_osrc_lib() { echo \"ERROR: a spend/cap gate library under \$SCRIPT_DIR/lib is missing or damaged; refusing to launch anything. Reinstall outsourcerer.\" >&2; exit 70; }"; done; unset _osrc_lib; }; _osrc_spend_failclosed  # re-run after the last lib load (line ~18616)
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
@@ -2563,7 +2563,7 @@ Finish your edits, then run the task's own unit tests and requested --check with
   # Bug-1 clarification: glm/swe (and the other plan-included ids) are FREE-tier on Devin. Devin's own
   # output shows a paid ACU balance that can read "0% remaining" — that figure is a SEPARATE paid pool
   # and does not gate a free-tier model. Say so up front so a "0%" line is never misread as a block.
-  local _dv_free=0; _devin_is_free_model "$MODEL" && _dv_free=1
+  local _dv_free=0; _devin_is_free_model "$MODEL" && ! _osrc_gate_paid dv && _dv_free=1
   [ "$_dv_free" = "1" ] && printf '>>> [free-tier] "%s" runs on Devin'\''s plan-included tier — a paid ACU / "0%% remaining" figure in Devin'\''s output is a separate balance and does NOT gate it.\n' "$MODEL" >&2
   # Proactive plan meter at the dispatch site: past the soft threshold, say (once per dispatch) that the
   # shared daily bucket is being drained hard. Routing advice only — a user-driven job is never blocked
@@ -2595,7 +2595,7 @@ Finish your edits, then run the task's own unit tests and requested --check with
     _posture_set devin autonomous restricted
     _devin_autonomous_restricted_notice
   fi
-  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure dv)" >&2
+  printf '>>> [receipt] %s.\n' "$(_osrc_receipt_disclosure dv)" >&2
   # The "retry with yolo" hint is wrong for the org-policy case (yolo is LESS safe and is not the
   # fix); the clean notice above already gave the right next step. Only hint for OTHER sandbox failures.
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ "$_policy_blocked" -eq 0 ]; then
@@ -2931,7 +2931,7 @@ _or_chain() {
 
 # resolve_model_row <user-model> -> echoes "id|lane|tier" from the table, or "" if unknown.
 resolve_model_row() {
-  printf '%s\n' "$OSRC_MODEL_TABLE" | awk -F'|' -v m="$1" '$1==m {print $2"|"$3"|"$4; exit}'
+  printf '%s\n' "$OSRC_MODEL_TABLE" | awk -F'|' -v m="$1" '$1==m {print $2"|"$3"|"$4; x=1; exit} c=="" && tolower($1)==tolower(m) {c=$2"|"$3"|"$4} END {if (!x && c!="") print c}'   # exact first, then case-folded (routing only)
 }
 
 tier_from_price() {   # <openrouter-id> -> budget|mid|frontier from cached pricing, or nonzero
@@ -12506,7 +12506,7 @@ $body"
     fi
   done
 
-  local i jid em ee et ep jprov rtag
+  _osrc_fanout_preflight "$verb"; local i jid em ee et ep jprov rtag   # spend/cap/route, once per pair, before any job
   local -a jfwd=(); local _fail=0 _ok=0
   for i in "${!labels[@]}"; do
     while [ "$(_fanout_running "$gid")" -ge "$maxpar" ]; do sleep "${OSRC_POLL:-10}"; done
@@ -13963,7 +13963,7 @@ delegate_cc() {
   local _fg_launch; _fg_launch="$(date +%s)"   # launch epoch for fg cost resolution
   _or_chain "$tier" >/dev/null   # in-process first: an all-excluded chain dies HERE, not inside $(...)
   for m in $(_or_chain "$tier"); do
-    ttier="$(resolve_tier "$m" "")"
+    _osrc_or_member_gate "$m" || die "spend gate refused OpenRouter model $m"; ttier="$(resolve_tier "$m" "")"
     _with_preamble_render "bundle+mcp"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
     wrapped="$(_build_prompt "$m" "$prompt" "" "bundle+mcp")"
     _tier_banner "cc-openrouter" "$m" "$ttier" "$posture | env: $load_note"
@@ -14512,7 +14512,7 @@ delegate_codex() {
   _codex_win_sandbox_args; [ "${#_or_iso[@]}" -eq 0 ] || _or_iso+=(${_CODEX_WIN_ARGS[@]+"${_CODEX_WIN_ARGS[@]}"})
   _or_chain "$tier" >/dev/null   # in-process first: an all-excluded chain dies HERE, not inside $(...)
   for m in $(_or_chain "$tier"); do
-    ttier="$(resolve_tier "$m" "")"
+    _osrc_or_member_gate "$m" || die "spend gate refused OpenRouter model $m"; ttier="$(resolve_tier "$m" "")"
     _with_preamble_render "bundle"   # in-process: an unhonorable --with grant dies HERE, not in a capture subshell
     wrapped="$(_build_prompt "$m" "$prompt" "" "bundle")"
     _tier_banner "codex-openrouter" "$m" "$ttier" "$posture"
@@ -15547,12 +15547,10 @@ route_delegate() {
   # never select a metered lane on their own (_osrc_lane_spendable).
   # UNCONDITIONAL: it runs even when lane resolution produced no _cap_lane — an
   # empty lane is billing=unknown and must refuse, never silently dispatch.
-  local _src=0
   # Devin: resolve ONCE, gate exactly that id; delegate() launches it verbatim (lib/devin-free.sh).
   local _gate_model="$RESOLVED_ID"; _OSRC_DV_LAUNCH_ID=""
   case "$disp" in devin|dv) _osrc_dv_launch_prepare; _gate_model="${_OSRC_DV_LAUNCH_ID:-$RESOLVED_ID}" ;; esac
-  _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || _src=$?
-  [ "$_src" != "0" ] && die "internal: _osrc_spend_gate returned $_src"
+  _osrc_spend_gate "${_cap_lane:-$disp}" "$_gate_model" "$disp" "dispatch $verb" || die "internal: _osrc_spend_gate returned $?"
 
   _route_resolution "$disp" "$RESOLVED_ID"
   _route_requires_confirmation && _route_confirm
@@ -15626,7 +15624,7 @@ route_delegate() {
   # worktree first, so the gate below scans (and the delegate reads) the tree the repo actually holds.
   # Same process as the dispatch, so the cd sticks. `continue` resumes a session tied to this cwd: skip.
   [ "$verb" = "continue" ] || _cloud_autoisolate "$disp" || true
-  _cloud_disclose "$disp" "$RESOLVED_ID" "${REST[*]:-}"
+  _cloud_disclose "$disp" "$_gate_model" "${REST[*]:-}"
 
   # AUTO-DETACH: if non-interactive AND slow-lane, auto-promote to an INTERACTIVE tmux session by
   # default (OSRC_REQUIRE_INTERACTIVE=1), NOT a headless bg job. Reuses the session-start machinery
@@ -16840,7 +16838,7 @@ _winpty_session() {
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
-      _winpty_cmd_send "$sdir" "$@"
+      _osrc_session_send_model_gate "$*"; _winpty_cmd_send "$sdir" "$@"
       ;;
     answer)
       _winpty_cmd_answer "$sdir" "$@"
@@ -17024,7 +17022,7 @@ session() {
     send)
       _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _osrc_session_cap_send "$SESSION_NAME" "$*"   # Spend/cap add-on: no new work to a capped lane
+      _osrc_session_cap_send "$SESSION_NAME" "$*"; _osrc_session_send_model_gate "$*"   # cap + /model spend gate
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
       # helpfully with the options + the answer command instead of typing into the menu. Typing
@@ -18019,7 +18017,7 @@ _loop_check() {
 }
 
 cmd_loop() {
-  local shape="${1:-}"; [ $# -gt 0 ] && shift
+  local shape="${1:-}"; [ $# -gt 0 ] && shift; _osrc_take_spend_ok "$@" 2>/dev/null && set -- "${_OSRC_ARGS[@]+"${_OSRC_ARGS[@]}"}"
   local resume=0 lid="" ldir=""
   case "$shape" in
     status)
@@ -18053,7 +18051,7 @@ cmd_loop() {
       [ -d "$ldir" ] || die "loop resume: no such loop '$lid' (see: loop status)"
       case "$(cat "$ldir/state" 2>/dev/null)" in
         success) die "loop resume: '$lid' already succeeded; refusing to rerun a successful loop" ;;
-        blocked|max_turns|max_time) ;;
+        blocked|max_turns|max_time|needs-approval) ;;
         *) die "loop resume: '$lid' is not a resumable terminal loop (state: $(cat "$ldir/state" 2>/dev/null || echo '?'))" ;;
       esac
       # An escalate loop's rung position and per-tier stall budget are not saved, so resuming one
@@ -18226,13 +18224,13 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
 
 The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
 $feedback"
-    # Delegate this attempt via the script itself (reuses all routing/consent/watchdog machinery).
-    # OSRC_NO_AUTODETACH=1 is MANDATORY here, not a preference: a detached delegate returns a job id
+    # Delegate this attempt via the script itself (reuses all routing/consent/watchdog machinery). OSRC_NO_AUTODETACH=1 is MANDATORY here, not a preference: a detached delegate returns a job id
     # immediately, so the acceptance check would run against files the delegate has not touched yet.
     # Every attempt would then see the same pre-edit failure, the stall guard would fire, and the loop
     # would report `blocked` while the real work landed in the background, unwatched. The loop is its
-    # own supervisor and is the thing meant to be long-running, so it always waits in the foreground.
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    # own supervisor and is the thing meant to be long-running, so it always waits in the foreground. Loop consent rides argv.
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    _osrc_loop_needs_approval verify "$lid" "$ldir" "$attempt" "$0 --spend-ok loop resume $lid" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     # Defense in depth: if a delegate ever detaches anyway, the check below would silently grade stale
     # files. Refuse to grade rather than emit a confident wrong verdict.
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
@@ -18313,7 +18311,7 @@ $feedback"
     printf '[worktree] loop %s: branch %s at %s (ahead %s, dirty %s) — inspect/merge, then: outsourcerer cleanup %s\n' "$lid" "$wbr" "$wt" "$ahead" "$dirty" "$lid" >&2
   fi
   echo "$state"
-  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
+  case "$state" in success) return 0 ;; blocked|needs-approval) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
 # ==========================================================================
@@ -18476,11 +18474,11 @@ EOF
 
 The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
 $feedback"
-    # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so
-    # the check would grade files that have not been written yet — and on THIS loop a false failure
-    # would also spend the next rung's money. The loop is its own supervisor; it always waits.
+    # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so the check would grade
+    # unwritten files — and a false failure would also spend the next rung's money. The loop always waits.
     local _a0 _ael; _a0=$(date +%s)
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     _ael=$(( $(date +%s) - _a0 ))
     local _skip_check=0 _result=fail cout="" crc=0
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
@@ -18603,7 +18601,7 @@ $feedback"
   esac
   echo "[loop escalate] $lid final: $state  ·  attempts + check output + receipts in $ldir" >&2
   echo "$state"
-  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
+  case "$state" in success) return 0 ;; blocked|needs-approval) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
 # ---- software factory (0.14.0): plan/task graph, done contract + land gate, flows ----
@@ -18612,7 +18610,7 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
-[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || { unset _OSRC_LIBEND_SPEND _OSRC_LIBEND_SPENDPATHS _OSRC_LIBEND_DEVINFREE _OSRC_LIBEND_CAPS; for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; _osrc_spend_failclosed; }; unset _osrc_lib
 
 main() {
   # Mint this run's marker id once, and export it so the prompt the delegate receives and every
@@ -18686,7 +18684,7 @@ main() {
   # from its own normalized argv inside cmd_bg; session start inserts after `start`.
   if [ -z "${OSRC_SPEND_NEXT:-}" ]; then
     case "$cmd" in
-      run|explore|research|edit|yolo|fanout) _osrc_spend_next_build "$cmd" ;;
+      run|explore|research|edit|yolo|fanout) _osrc_spend_next_build "$cmd" ;; loop) _osrc_spend_next_build "${1:-loop}" ;;
       bg)   _osrc_spend_next_build bg "$@" ;;
       session) [ "${1:-}" = "start" ] && _osrc_spend_next_build start ;;
     esac

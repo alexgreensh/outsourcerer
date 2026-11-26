@@ -97,13 +97,95 @@ eq "mixed-only catalog: fusion sidekick row never free" "$_bill" metered
 rm -rf "$TMP2"
 
 # --- offline fallback: with the catalog check off, the static list still recognizes swe-2 --------
-eq "offline: swe-2 free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2 && echo yes || echo no)" yes
-eq "offline: swe-2-flash free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash && echo yes || echo no)" yes
+eq "offline: bare swe-2 alias is NOT labelled free (Devin resolves it)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2 && echo yes || echo no)" no
+eq "offline: bare swe-2-flash alias is NOT labelled free" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash && echo yes || echo no)" no
 eq "offline: swe-2-flash-high free via static list" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model swe-2-flash-high && echo yes || echo no)" yes
 eq "offline: nova-9 NOT known (no static, no catalog)" "$(OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model nova-9 && echo yes || echo no)" no
 
+# --- codex post-promo scenario: the alias must land on the FREE variant, and gate/dispatch -------
+# --- resolution of the same token must agree on classification. swe-1-7 fully Free; the newer -----
+# --- swe-2-1 family has a PAID -high (the default effort) but a FREE -max. Before the fix, the ----
+# --- effort filter ran before cost and `-m swe` resolved to the paid swe-2-1-high while the -------
+# --- spend gate classified the static-table id swe-1.7 as free — silent spend, no consent. --------
+TMP3="$(mktemp -d)"; mkdir -p "$TMP3/catalogs"
+cat > "$TMP3/catalogs/dv.raw.json" <<'JSON'
+{"families":[
+ {"family_uid":"swe-1-7","slug":"swe-1-7","variants":[
+   {"model_uid":"swe-1-7-high","cost_tier":"Free"},
+   {"model_uid":"swe-1-7-max","cost_tier":"Free"}]},
+ {"family_uid":"swe-2-1","slug":"swe-2-1","variants":[
+   {"model_uid":"swe-2-1-high","cost_tier":"High cost"},
+   {"model_uid":"swe-2-1-max","cost_tier":"Free"}]},
+ {"family_uid":"swe-2","slug":"swe-2","variants":[
+   {"model_uid":"swe-2-high","cost_tier":"High cost"}]}
+]}
+JSON
+echo '[]' > "$TMP3/catalogs/dv.json"
+_pp="$(OSRC_HOME="$TMP3" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1; unset EFFORT; _devin_resolve_model swe' 2>/dev/null)"
+eq "post-promo: swe alias resolves to the FREE -max, not paid -high" "$_pp" swe-2-1-max
+_ppfree="$(OSRC_HOME="$TMP3" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1; unset EFFORT
+  r="$(_devin_resolve_model swe)"; _devin_is_free_model "$r" && echo yes || echo no' 2>/dev/null)"
+eq "post-promo: the resolved launch id classifies free consistently" "$_ppfree" yes
+_dot="$(OSRC_HOME="$TMP3" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1; unset EFFORT; _devin_resolve_model swe-1.7' 2>/dev/null)"
+eq "post-promo: dotted family id resolves dynamically to a real variant" "$_dot" swe-1-7-high
+
+# --- case/dot exact-variant normalization: a mixed-case PAID variant must classify as paid -------
+# --- after resolution (the end-to-end consent path depends on it) ---------------------------------
+_mc="$(OSRC_HOME="$TMP" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1
+  r="$(_devin_resolve_model "ZETA-4-Max")"; printf "%s|" "$r"
+  _devin_is_free_model "$r" && echo free || echo metered' 2>/dev/null)"
+eq "mixed-case paid variant resolves to exact id and classifies metered" "$_mc" "zeta-4-max|metered"
+_mc2="$(OSRC_HOME="$TMP" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1
+  r="$(_devin_resolve_model "SWE-2.1-High")"; printf "%s|" "$r"
+  _devin_is_free_model "$r" && echo free || echo metered' 2>/dev/null)"
+eq "mixed-case/dot free variant resolves to exact id and classifies free" "$_mc2" "swe-2-1-high|free"
+
+# --- cross-family ranking: version digits are family-scoped, catalog order decides across ---------
+# --- families, and date-like digit runs are not versions (Instinct MED, verified) -----------------
+TMP4="$(mktemp -d)"; mkdir -p "$TMP4/catalogs"
+cat > "$TMP4/catalogs/dv.raw.json" <<'JSON'
+{"families":[
+ {"family_uid":"claude-4","slug":"claude-4","variants":[{"model_uid":"claude-4-high","cost_tier":"Free"}]},
+ {"family_uid":"gpt-5","slug":"gpt-5","variants":[{"model_uid":"gpt-5-high","cost_tier":"Free"}]},
+ {"family_uid":"x-20250514","slug":"x-20250514","variants":[{"model_uid":"x-20250514-high","cost_tier":"Free"}]}
+]}
+JSON
+echo '[]' > "$TMP4/catalogs/dv.json"
+_xf="$(OSRC_HOME="$TMP4" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1; _devin_default_free_model' 2>/dev/null)"
+eq "cross-family: catalog order decides, not digit magnitude" "$_xf" claude-4-high
+_dr="$(printf '%s\n' x-20250514-high x-3-high | _osrc_pick_best_free 2>/dev/null)"
+eq "date-like digit run never outranks a real version within a family" "$_dr" x-3-high
+
+# --- deliberate fail-closed pin: a cost_tier that merely STARTS with free is paid -----------------
+# --- ("Free (promo)", "Free until Dec 1"). Exact-match-only is the intended safety property; -------
+# --- a future free model going undiscovered is the accepted cost of never billing silently. --------
+TMP5="$(mktemp -d)"; mkdir -p "$TMP5/catalogs"
+cat > "$TMP5/catalogs/dv.raw.json" <<'JSON'
+{"families":[
+ {"family_uid":"promo-1","slug":"promo-1","variants":[{"model_uid":"promo-1-high","cost_tier":"Free (promo)"}]}
+]}
+JSON
+echo '[]' > "$TMP5/catalogs/dv.json"
+_nfr="$(OSRC_HOME="$TMP5" OSRC_CATALOG_TTL=999999 bash -c '
+  OSRC_SOURCED=1 . "'"$SRC"'" >/dev/null 2>&1
+  _devin_is_free_model promo-1-high && echo free || echo metered' 2>/dev/null)"
+eq "near-free cost_tier fails closed (deliberate)" "$_nfr" metered
+
+# --- structural: the spend gate resolves the SAME token dispatch uses (MODEL, not RESOLVED_ID) ----
+# (the resolve-once code: route_delegate gates _OSRC_DV_LAUNCH_ID from _osrc_dv_launch_prepare,
+# which resolves the token delegate()'s own parse_model reads — never RESOLVED_ID)
+grep -q '_osrc_dv_launch_prepare; _gate_model="${_OSRC_DV_LAUNCH_ID' "$SRC" \
+  && ok "source: spend gate resolves the same MODEL token dispatch uses" \
+  || bad "source: spend gate input diverged from dispatch (codex regression)"
+
 # --- source cross-check: the classification actually consults the catalog ------------------------
-grep -q 'set="$(_devin_catalog_free_set)"' "$(dirname "$SRC")/lib/devin-free.sh" && ok "source: _devin_is_free_model consults the catalog set" \
+grep -q '^  _devin_catalog_free_set$' "$(dirname "$SRC")/lib/devin-free.sh" && ok "source: _devin_is_free_model consults the catalog set" \
   || bad "source: catalog-driven free check removed"
 
 echo "---- $pass passed, $fail failed ----"

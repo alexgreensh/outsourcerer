@@ -51,8 +51,10 @@ calls() { cat "$FAKE_DEVIN_LOG" 2>/dev/null | tr '\n' ' ' | sed 's/ $//'; }
 # The plan-quota-probe default alt is now discovered from the live catalog (a network refresh that
 # would call the fake devin and pollute `calls`). This suite tests the plan-quota logic with the known
 # swe-2 sibling, so pin the alt deterministically; the catalog-driven alt is covered by
-# test_devin_catalog_free_tier.sh.
-export OSRC_DEVIN_PROBE_MODEL_ALT=swe-2
+# test_devin_catalog_free_tier.sh. The exact id swe-2-high: a no-consent probe pings only a proven-Free
+# id (test_devin_probe_strict.sh), and the bare swe-2 alias proves nothing.
+export OSRC_DEVIN_PROBE_MODEL_ALT=swe-2-high
+export OSRC_FREE_CATALOG_CHECK=0   # offline proof only: a catalog fetch would also call the fake devin
 
 FX="$TMP/fx"; mkdir -p "$FX"
 printf 'Error: Your daily usage quota has been exhausted. It resets in 11h26m. See https://app.devin.ai/settings/usage\n' > "$FX/daily"
@@ -103,9 +105,9 @@ grep -q 'Devin says it resets in 11h26m' <<<"$_out" && ok "answered: still quote
 # === (c) refused model IS the default probe model -> probe a SIBLING, not the same model ==========
 refuse glm-5-2
 _out="$(_devin_plan_quota_block "$FX/daily" glm-5-2 'scope' 'advice' 2>&1)"
-[ "$(calls)" = "swe-2" ] && ok "sibling: glm-5-2 refused -> probe went to swe-2 (separate Free tier), not back to glm-5-2" || bad "sibling: devin calls were '$(calls)'"
+[ "$(calls)" = "swe-2-high" ] && ok "sibling: glm-5-2 refused -> probe went to swe-2-high (separate Free tier), not back to glm-5-2" || bad "sibling: devin calls were '$(calls)'"
 _lane_down_active dv && bad "sibling: lane down although swe-2 answered" || ok "sibling: lane stays up on the sibling's answer"
-[ "$(_devin_plan_probe_model glm-5.2)" = "swe-2" ] && ok "sibling: dotted alias glm-5.2 folds to the probe alt swe-2" || bad "sibling: got '$(_devin_plan_probe_model glm-5.2)'"
+[ "$(_devin_plan_probe_model glm-5.2)" = "swe-2-high" ] && ok "sibling: dotted alias glm-5.2 folds to the probe alt swe-2-high" || bad "sibling: got '$(_devin_plan_probe_model glm-5.2)'"
 [ "$(_devin_plan_probe_model kimi-k3)" = "glm-5-2" ] && ok "sibling: any other refused model probes the default glm-5-2" || bad "sibling: got '$(_devin_plan_probe_model kimi-k3)'"
 [ "$(OSRC_DEVIN_PROBE_MODEL=swe-1-7 OSRC_DEVIN_PROBE_MODEL_ALT=kimi-k3 _devin_plan_probe_model swe-1-7)" = "kimi-k3" ] && ok "sibling: probe/alt overridable via env" || bad "sibling: env override ignored"
 

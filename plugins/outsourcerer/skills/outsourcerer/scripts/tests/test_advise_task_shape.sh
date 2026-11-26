@@ -54,7 +54,9 @@ ck "NO kimi bump on hard code"    "$(_score 50 capable code high hard kimi-k3)" 
 for a in glm-5.3:glm-5-3 glm-5.3-high:glm-5-3-high glm-5.3-flash:glm-5-3-flash glm-5.3-flash-high:glm-5-3-flash-high; do
   row="$(resolve_model_row "${a%%:*}")"; ck "table: ${a%%:*} resolves" "${row%%|*}" "${a##*:}"
   ck "table: ${a%%:*} lane/tier" "$(printf '%s' "$row" | cut -d'|' -f2-3)" "dv|capable"
-  _devin_is_free_model "${a##*:}" && ok "plan-included: ${a##*:}" || bad "plan-included predicate misses ${a##*:}"
+  # No glm-5.3* glob any more: the catalog prices these (Low cost), so without a live Free tag
+  # they must not be labelled plan-included (torture-room pattern F1).
+  OSRC_FREE_CATALOG_CHECK=0 _devin_is_free_model "${a##*:}" && bad "unproven ${a##*:} labelled free" || ok "unproven ${a##*:} not labelled free"
 done
 ck "offline sibling map: glm-5.3-flash-high" "$(OSRC_DEVIN_DYNAMIC_RESOLVE=0 _devin_resolve_model glm-5.3-flash-high)" glm-5-3-flash-high
 grep -q '^glm-5-3-flash-high|z-ai/glm-5.3-flash$' $SRC_LIB && ok "bench map: glm-5-3-flash-high -> z-ai/glm-5.3-flash" || bad "bench map entry missing for glm-5-3-flash-high"

@@ -515,9 +515,11 @@ b=$( OSRC_SPEND_OK=1 OSRC_SOURCED=1 bash -c '. "'"$SRC"'" >/dev/null 2>&1; print
 # header, and an EXACT lane|model pair (never "*", never empty). Runs in the
 # already-sourced shell with env-prefixes exactly as the detached child's gate reads them.
 JD="$OSRC_HOME/jobs/r3job"; mkdir -p "$JD"
-_mkmark() {  # <dir> <token> <pairs...>
+_mkmark() {  # <dir> <token> <pairs...> -- also the job record a real launch leaves: meta.json
+  # naming the job, and the supervisor pid (this in-process gate's ancestor: the shell's parent)
   local d="$1" t="$2"; shift 2
   { printf '#osrc-spend-ok token=%s\n' "$t"; printf '%s\n' "$@"; } > "$d/.spend-ok"
+  printf '{"id":"%s"}\n' "${d##*/}" > "$d/meta.json"; printf '%s\n' "$PPID" > "$d/supervisor_pid"
 }
 # Wildcard and empty-model fields authorize NOTHING anymore.
 _mkmark "$JD" tokA 'or|*'
@@ -546,6 +548,13 @@ out="$( OSRC_JOB_DIR="$OUTJ" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model 
 NEST="$OSRC_HOME/jobs/a/b"; mkdir -p "$NEST"; _mkmark "$NEST" tokA 'or|some-model'
 out="$( OSRC_JOB_DIR="$NEST" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
 [ $rc -ne 0 ] && ok "r3.2 spend: nested job dir consents nothing" || bad "r3.2 spend: nested dir consented (rc=$rc)"
+# A forged job dir (marker + token, but no engine job record / supervisor ancestor) consents nothing.
+FJ="$OSRC_HOME/jobs/forged"; mkdir -p "$FJ"; _mkmark "$FJ" tokA 'or|some-model'; rm -f "$FJ/meta.json"
+out="$( OSRC_JOB_DIR="$FJ" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: forged marker without meta.json consents nothing" || bad "r3.2 spend: forged marker (no meta) consented"
+_mkmark "$FJ" tokA 'or|some-model'; echo 999999 > "$FJ/supervisor_pid"
+out="$( OSRC_JOB_DIR="$FJ" OSRC_JOB_TOKEN=tokA _osrc_spend_gate or some-model or "test" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && ok "r3.2 spend: marker whose supervisor is not an ancestor consents nothing" || bad "r3.2 spend: non-ancestor supervisor consented"
 # Binding still holds inside the trusted context: lane `or` marker does NOT authorize `dv`,
 # and a model-bound marker does not cover a different model on the same lane.
 _mkmark "$JD" tokA 'or|some-model'

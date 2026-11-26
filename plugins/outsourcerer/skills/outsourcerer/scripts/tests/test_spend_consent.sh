@@ -329,6 +329,7 @@ FD="$TMP/notjobs/jd"; mkdir -p "$FD"; printf 'x\n' > "$FD/.spend-ok"
 # Marker consent (no flag) still binds the exact pair and records the path for the gate.
 JD2="$OSRC_HOME/jobs/job-r6mark"; mkdir -p "$JD2"
 printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD2/.spend-ok"
+printf '{"id":"job-r6mark"}\n' > "$JD2/meta.json"; echo "$PPID" > "$JD2/supervisor_pid"   # the job record a real launch leaves
 OSRC_JOB_DIR="$JD2" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
 { [ $rc -eq 0 ] && [ "$_OSRC_SPEND_MARKER" = "$JD2/.spend-ok" ]; } \
   && ok "r6 marker: marker consent still binds exact pair" \
@@ -425,6 +426,122 @@ else
 fi
 unset _r9noval
 
+# ---------------------------------------------------------------------------------------------------
+# ROUND 3.4 (Instinct re-review note A): the gate-resolves-the-launched-id invariant proven
+# END TO END through route_delegate — not by grepping the source. A pinned `-m swe` on a
+# post-promo catalog where every swe variant is PAID must refuse non-interactively, and the
+# refusal must name the RESOLVED launch id (swe-2-1-high), never the raw token (swe) or the
+# static-table id (swe-1.7, which is static-free-for-spend — the codex bypass input). With
+# --spend-ok the same run must dispatch exactly the id the gate classified. The mixed-cost
+# catalog proves cost-before-effort end to end: a Free -max must dispatch with NO consent
+# although the effort-matching -high is paid. OSRC_NO_AUTODETACH=1 is mandatory on positive
+# dispatch rows — without it a slow lane re-routes into a real tmux session the test cannot see.
+# ---------------------------------------------------------------------------------------------------
+PACAT="$TMP/postpromo"; mkdir -p "$PACAT/home" "$PACAT/osrc/catalogs"
+mkdir -p "$PACAT/osrc/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$PACAT/osrc/disk-policy/settings"
+cat > "$PACAT/osrc/catalogs/dv.raw.json" <<'EOF'
+{"families":[
+ {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
+   {"model_uid":"swe-2-1-high","cost_tier":"High cost","cost_summary":"$5/MTok"},
+   {"model_uid":"swe-2-1-max","cost_tier":"High cost","cost_summary":"$8/MTok"}]},
+ {"family_uid":"swe-2","aliases":[],"variants":[
+   {"model_uid":"swe-2-high","cost_tier":"High cost","cost_summary":"$4/MTok"}]}]}
+EOF
+printf '["swe-2-1","swe-2-1-high","swe-2-1-max","swe-2","swe","swe-2-high"]\n' > "$PACAT/osrc/catalogs/dv.json"
+
+# A1: `-m swe` with every swe variant paid refuses and names the RESOLVED paid id.
+: > "$TMP/devin-stub.log"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$PACAT/osrc/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$PACAT/home" OSRC_HOME="$PACAT/osrc" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 \
+    bash "$SRC" run -m swe "post-promo task" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane:dv/swe-2-1-high"*) ok "r3.4 e2e: -m swe on all-paid catalog refuses naming the resolved launch id" ;;
+  *) bad "r3.4 e2e: refusal missing/named the wrong id (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+case "$out" in
+  *"paid-lane:dv/swe "*|*"paid-lane:dv/swe-1.7"*) bad "r3.4 e2e: refusal named the raw token or the static-table id: $(printf '%s' "$out" | grep -o 'paid-lane:[^ ]*' | head -1)" ;;
+  *) ok "r3.4 e2e: refusal never names raw-token swe or static-table swe-1.7" ;;
+esac
+grep -q -- '--model' "$TMP/devin-stub.log" \
+  && bad "r3.4 e2e: refused run still dispatched: $(grep -- '--model' "$TMP/devin-stub.log" | head -1)" \
+  || ok "r3.4 e2e: refused run dispatched nothing"
+
+# A2: with --spend-ok the SAME run dispatches exactly the id the gate classified —
+# gate input == launched id, the whole point of the round-2 fix.
+# OSRC_CLOUD_ACK=1 is REQUIRED on every positive-dispatch row: the first real launch hits
+# the one-time cloud consent gate otherwise, and the row passes on a dev machine only
+# because the variable leaks in from the interactive shell's env (CI sees red).
+: > "$TMP/devin-stub.log"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$PACAT/osrc/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$PACAT/home" OSRC_HOME="$PACAT/osrc" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 \
+    bash "$SRC" run --spend-ok -m swe "post-promo task" 2>&1 </dev/null )"; rc=$?
+if [ $rc -eq 0 ] && grep -q -- '--model swe-2-1-high ' "$TMP/devin-stub.log"; then
+  ok "r3.4 e2e: consented run launches exactly the gated id swe-2-1-high"
+else
+  bad "r3.4 e2e: consented run rc=$rc launched: $(grep -- '--model' "$TMP/devin-stub.log" | head -1)"
+fi
+# The cloud disclosure a person reads before consenting must name the LAUNCHED id, not
+# the static-table id — the round-4 display fix (spend line already named swe-2-1-high
+# while the disclosure said swe-1.7, two different models on one consent screen).
+case "$out" in
+  *"CLOUD DISCLOSURE: delegating to a CLOUD lane (devin / swe-2-1-high)"*) ok "r3.4 e2e: cloud disclosure names the launched id, not the table id" ;;
+  *) bad "r3.4 e2e: cloud disclosure wrong: $(printf '%s' "$out" | grep 'CLOUD DISCLOSURE' | head -1)" ;;
+esac
+
+# A3: post-promo MIXED catalog — paid -high, Free -max in one family. Cost outranks
+# effort end to end: no consent asked and the FREE -max is what launches.
+MCAT="$TMP/mixedcat"; mkdir -p "$MCAT/home" "$MCAT/osrc/catalogs"
+mkdir -p "$MCAT/osrc/disk-policy" && printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$MCAT/osrc/disk-policy/settings"
+cat > "$MCAT/osrc/catalogs/dv.raw.json" <<'EOF'
+{"families":[
+ {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
+   {"model_uid":"swe-2-1-high","cost_tier":"High cost","cost_summary":"$5/MTok"},
+   {"model_uid":"swe-2-1-max","cost_tier":"Free","cost_summary":null}]},
+ {"family_uid":"swe-2","aliases":[],"variants":[
+   {"model_uid":"swe-2-high","cost_tier":"High cost","cost_summary":"$4/MTok"}]}]}
+EOF
+printf '["swe-2-1","swe-2-1-high","swe-2-1-max","swe-2","swe","swe-2-high"]\n' > "$MCAT/osrc/catalogs/dv.json"
+: > "$TMP/devin-stub.log"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$MCAT/osrc/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$MCAT/home" OSRC_HOME="$MCAT/osrc" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_CLOUD_ACK=1 \
+    bash "$SRC" run -m swe "post-promo free task" 2>&1 </dev/null )"; rc=$?
+case "$out" in
+  *"spend gate"*|*"PAID LANE"*|*"EVENT approval"*) bad "r3.4 e2e: free-max resolution asked for spend: $(printf '%s' "$out" | head -4)" ;;
+  *) [ $rc -eq 0 ] && grep -q -- '--model swe-2-1-max ' "$TMP/devin-stub.log" \
+       && ok "r3.4 e2e: -m swe launches FREE swe-2-1-max over paid -high, no consent" \
+       || bad "r3.4 e2e: free-max run rc=$rc launched: $(grep -- '--model' "$TMP/devin-stub.log" | head -1)" ;;
+esac
+
+# A4: mixed-case/dot paid variant — Instinct's round-1 ask. SWE-2.1-Max exact-matches
+# the paid catalog variant through case/dot normalization and must refuse naming it.
+: > "$TMP/devin-stub.log"
+out="$( cd "$TMP" && DEVIN_STUB_LOG="$TMP/devin-stub.log" DEVIN_STUB_CATALOG="$PACAT/osrc/catalogs/dv.raw.json" \
+    PATH="$DBIN:$FAKEBIN:$PATH" HOME="$PACAT/home" OSRC_HOME="$PACAT/osrc" OSRC_SOURCED= \
+    OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 \
+    bash "$SRC" run -m "SWE-2.1-Max" "mixed case task" 2>&1 </dev/null )"; rc=$?
+[ $rc -ne 0 ] && case "$out" in
+  *"EVENT approval"*"paid-lane:dv/swe-2-1-max"*) ok "r3.4 e2e: mixed-case SWE-2.1-Max refuses naming resolved swe-2-1-max" ;;
+  *) bad "r3.4 e2e: mixed-case refusal wrong (rc=$rc): $(printf '%s' "$out" | head -4)" ;;
+esac
+grep -q -- '--model' "$TMP/devin-stub.log" \
+  && bad "r3.4 e2e: mixed-case refused run still dispatched: $(grep -- '--model' "$TMP/devin-stub.log" | head -1)" \
+  || ok "r3.4 e2e: mixed-case refused run dispatched nothing"
+
 echo
+# --- arch F5: one factory --spend-ok binds to the first task's pair, not every task ---------------
+FJ="$OSRC_HOME/jobs"; mkdir -p "$FJ/f1" "$FJ/f2" "$FJ/f3" "$FJ/f4"
+f5="$( bash -c '. "'"$SRC"'" >/dev/null 2>&1; OSRC_SPEND_OK=1
+  w() { ( OSRC_TASK_REF="$1" OSRC_JOB_TOKEN="tok$2"; _osrc_spend_marker_write "'"$FJ"'/f$2" cc run --provider cc -m "$3" ); }
+  w plan/t1 1 glm-5.2; w plan/t2 2 deepseek/deepseek-v4-pro; w plan/t3 3 glm-5.2
+  ( OSRC_JOB_TOKEN=tok4; _osrc_spend_marker_write "'"$FJ"'/f4" cc run --provider cc -m deepseek/deepseek-v4-pro )' 2>&1)"
+[ -f "$FJ/f1/.spend-ok" ] && [ ! -e "$FJ/f2/.spend-ok" ] && [ -f "$FJ/f3/.spend-ok" ] \
+  && ok "F5: factory consent covers the first task's pair (and same-pair tasks), not a different paid model" \
+  || bad "F5: factory markers f1=$([ -f "$FJ/f1/.spend-ok" ] && echo y) f2=$([ -f "$FJ/f2/.spend-ok" ] && echo y) f3=$([ -f "$FJ/f3/.spend-ok" ] && echo y): $f5"
+case "$f5" in *"plan/t2 needs"*) ok "F5: the uncovered task is named" ;; *) bad "F5: no notice for the uncovered task: $f5" ;; esac
+[ -f "$FJ/f4/.spend-ok" ] && ok "F5: a non-factory bg keeps its own marker" || bad "F5: non-factory bg lost its marker"
+
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

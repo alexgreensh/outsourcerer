@@ -148,7 +148,7 @@ _picker_cases() (
 check _picker_cases
 # Exercise the fanout launcher and its real marker writer with a stub child gate.
 _fanout_consent() (
-  _heartbeat_arm_verify() { :; }; _bg_cloud_preack() { :; }; _fanout_running() { echo 0; }
+  _heartbeat_arm_verify() { :; }; _bg_cloud_preack() { :; }; _fanout_running() { echo 0; }; _osrc_fanout_preflight() { :; }
   _bg_launch() {
     local jd="$OSRC_JOBS/fanout-child"; mkdir -p "$jd"; OSRC_JOB_TOKEN=fixture
     _osrc_spend_marker_write "$jd" "$PROVIDER" "$@"

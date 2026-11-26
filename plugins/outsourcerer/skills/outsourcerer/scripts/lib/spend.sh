@@ -81,11 +81,9 @@ _osrc_devin_free_for_spend() {
   # spelling verbatim (offline, or a bg pin), so the judged id was not the launched one.
   # Routed launches still match: the resolver returns the catalog's exact uid.
   [ -n "$t" ] || return 1
-  if [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ]; then
-    if ids="$(_devin_catalog_free_ids 2>/dev/null)"; then
-      # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
-      case " $ids " in *" $t "*) return 0 ;; *) return 1 ;; esac
-    fi
+  if _devin_free_ids_get; then
+    # Catalog reachable: ONLY its Free tag decides — the static fallback does not apply.
+    case " $_OSRC_DV_FREE_IDS " in *" $t "*) return 0 ;; *) return 1 ;; esac
   fi
   case "$t" in
     swe-2-high|swe-2-flash-high) return 0 ;;
@@ -112,8 +110,9 @@ _devin_catalog_free_ids() {
   [ -n "$_OSRC_DV_FREE_IDS_DONE" ] && { printf '%s' "$_OSRC_DV_FREE_IDS_MEMO"; return 0; }
   local rawf cf mt cmt cids ids
   rawf="$(_devin_catalog_rawf)" || return 1
-  _catalog_load dv >/dev/null 2>&1 || true    # refresh attempt; freshness below decides
-  _catalog_fresh dv || return 1               # only a LIVE (or just-fetched) catalog proves Free
+  # Only a LIVE (or just-fetched) catalog proves Free. Freshness first: the refresh (which also
+  # jq-parses the flat list) runs only when the cache is stale, so a cache hit is one stat + read.
+  _catalog_fresh dv || { _catalog_load dv >/dev/null 2>&1; _catalog_fresh dv; } || return 1
   [ -f "$rawf" ] || return 1
   cf="$OSRC_HOME/.devin-free-ids"
   # GNU-first order (matches outsourcerer.sh's catalog mtime): on Linux `stat -f` is
@@ -152,6 +151,18 @@ _devin_catalog_free_ids() {
   return 0
 }
 
+# _devin_free_ids_get -> sets _OSRC_DV_FREE_IDS (the exact Free ids) in the CALLER's shell, rc as
+# _devin_catalog_free_ids. Memoized in the caller, an unprovable answer too (DONE=0), so the
+# billing, label and default-model checks of one process share one lookup — call it directly,
+# never through $( ). OSRC_FREE_CATALOG_CHECK=0 is checked first, every time.
+_OSRC_DV_FREE_IDS=""; _OSRC_DV_FREE_IDS_GOT=""
+_devin_free_ids_get() {
+  [ "${OSRC_FREE_CATALOG_CHECK:-1}" = "1" ] || return 1
+  case "$_OSRC_DV_FREE_IDS_GOT" in 1) return 0 ;; 0) return 1 ;; esac
+  if _OSRC_DV_FREE_IDS="$(_devin_catalog_free_ids 2>/dev/null)"; then _OSRC_DV_FREE_IDS_GOT=1; return 0; fi
+  _OSRC_DV_FREE_IDS=""; _OSRC_DV_FREE_IDS_GOT=0; return 1
+}
+
 # _osrc_rank_free_ids -> tab-separated rank rows for exact catalog Free ids:
 # budget, qualifier-penalty, version-key, tier, raw-id. Design notes (Neon review):
 # - Letters are meaningless across families and qualifier segments (-mini/-preview)
@@ -177,12 +188,21 @@ _osrc_rank_free_ids() {
     gsub(/\./, "-", base)
     rest = base; vk = ""
     while (match(rest, /[0-9]+/)) {
-      vk = vk sprintf("%012d", substr(rest, RSTART, RLENGTH) + 0) "-"
+      # Digit runs of 5+ digits are dates or build stamps (x-20250514-high), not versions:
+      # left in, their magnitude outranks every real version key (Instinct review, verified).
+      if (RLENGTH < 5) vk = vk sprintf("%012d", substr(rest, RSTART, RLENGTH) + 0) "-"
       rest = substr(rest, RSTART + RLENGTH)
     }
+    # Version recency is meaningful only WITHIN a family: comparing digit runs across
+    # families ranked gpt-5 over claude-4 for no quality reason. The family key strips
+    # digits and dashes; famidx is first-seen (catalog) order, so across families the
+    # catalog decides and only same-family rows compare version keys (Instinct MED).
+    famkey = base; gsub(/[0-9]/, "", famkey); gsub(/-/, "", famkey)
+    if (!(famkey in famseen)) famseen[famkey] = ++famn
+    famidx = famseen[famkey]
     nseg = split(base, seg, /-/); qual = 0; seen = 0
     for (i = 1; i <= nseg; i++) if (seg[i] ~ /^[a-z]+$/) { if (seen) qual++; seen = 1 }
-    printf "%d\t%d\t%s\t%d\t%s\n", budget, qual, vk, tier, id
+    printf "%d\t%d\t%d\t%s\t%d\t%s\n", budget, qual, famidx, vk, tier, id
   }'
 }
 
@@ -191,14 +211,19 @@ _osrc_rank_free_ids() {
 _osrc_free_lines() { printf '%s' "$1" | tr ' ' '\n' | awk 'NF'; }
 
 # _osrc_pick_best_free -> best id from newline rows on stdin: newest -high first
-# (the lane default), otherwise the strongest/newest. sort drains fully into awk so
+# (the lane default), otherwise the strongest/newest. Sort keys: budget partition,
+# qualifier-segment penalty, first-seen family order (catalog order across families),
+# family-scoped version key (string reverse), tier. sort drains fully into awk so
 # no SIGPIPE can hit the producer under pipefail. LC_ALL=C pins byte-order collation.
 _osrc_pick_best_free() {
   local rows high
   rows=$(cat)
   [ -n "$rows" ] || return 1
   high=$(printf '%s\n' "$rows" | awk 'tolower($0) ~ /-high$/')
-  if [ -n "$high" ]; then printf '%s\n' "$high"; else printf '%s\n' "$rows"; fi     | _osrc_rank_free_ids     | LC_ALL=C sort -t$'\t' -k1,1n -k2,2n -k3,3r -k4,4nr     | awk -F'\t' 'NR == 1 { out = $5 } END { if (out != "") print out }'
+  if [ -n "$high" ]; then printf '%s\n' "$high"; else printf '%s\n' "$rows"; fi \
+    | _osrc_rank_free_ids \
+    | LC_ALL=C sort -t$'\t' -k1,1n -k2,2n -k3,3n -k4,4r -k5,5nr \
+    | awk -F'\t' 'NR == 1 { out = $6 } END { if (out != "") print out }'
 }
 
 # _devin_default_free_model -> the dv lane's implicit default, picked at RUN TIME from
@@ -207,7 +232,10 @@ _osrc_pick_best_free() {
 #   1. mainline partition first — flash/fast/lightning are used only when NO mainline
 #      Free id exists at all;
 #   2. the SWE coding family preferred within that partition, never required;
-#   3. newest -high variant, then strongest/newest remaining.
+#   3. newest -high variant, then strongest/newest remaining. Version recency is
+#      family-scoped: across families digit runs mean nothing (gpt-5 is not newer
+#      than claude-4), so catalog order decides and date-like digit runs are not
+#      versions at all (see _osrc_rank_free_ids).
 # Catalog unreachable or nothing Free -> swe-2-high, the deliberately conservative offline
 # fallback. Offline there is no fresh proof either way: swe-2-high/flash-high are static
 # free-for-spend ids, so a bare run on them does NOT ask; if Devin re-prices them while
@@ -216,7 +244,7 @@ _osrc_pick_best_free() {
 # _route_provider_default_model, osrc_lane_billing dv.
 _devin_default_free_model() {
   local ids rows main swe cand
-  if ids="$(_devin_catalog_free_ids 2>/dev/null)" && [ -n "$ids" ]; then
+  if _devin_free_ids_get && ids="$_OSRC_DV_FREE_IDS" && [ -n "$ids" ]; then
     rows="$(_osrc_free_lines "$ids")"
     main=$(printf '%s\n' "$rows" | awk 'tolower($0) !~ /(flash|fast|lightning)/')
     [ -n "$main" ] || main="$rows"
@@ -225,6 +253,10 @@ _devin_default_free_model() {
     cand=$(printf '%s\n' "$main" | _osrc_pick_best_free 2>/dev/null)
     [ -n "$cand" ] && { printf '%s' "$cand"; return 0; }
   fi
+  # The fallback is a money-relevant decision (swe-2-high is a static free-for-spend id whose
+  # pricing is unverifiable offline), so it must never be silent — one line, stderr only,
+  # stdout stays the bare id every caller expects.
+  printf '>>> [model] live catalog unreachable or no verified Free model — using offline fallback swe-2-high (static free-for-spend id; see docs: offline exception).\n' >&2
   printf 'swe-2-high'
 }
 
@@ -445,7 +477,10 @@ _osrc_spend_ok() {
   local lane="${1:-}" model="${2:-}"
   if [ "${OSRC_SPEND_OK:-0}" = "1" ]; then
     if [ -n "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
-      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] && [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || return 1
+      [ "$_OSRC_SPEND_BOUND_LANE" = "$lane" ] || return 1
+      # The pair, or a member of the OpenRouter chain the consent prompt listed (_osrc_or_set).
+      [ "${_OSRC_SPEND_BOUND_MODEL:-}" = "$model" ] || case " ${_OSRC_SPEND_BOUND_SET:-} " in
+        *" $model "*) [ -n "$model" ] ;; *) return 1 ;; esac || return 1
     fi
     # A supervised job's marker limits even a forwarded flag to its approved pair.
     local _jd="${OSRC_JOB_DIR:-}" _jobs="${OSRC_JOBS:-${OSRC_HOME:-}/jobs}" _rest _mf _header _l _m _match=0
@@ -479,12 +514,33 @@ _osrc_spend_ok() {
   _hd="$(head -n 1 "$mf" 2>/dev/null)"
   case "$_hd" in "#osrc-spend-ok token="*) mtok="${_hd#*=}" ;; *) return 1 ;; esac
   [ -n "$mtok" ] && [ "$mtok" = "$tok" ] || return 1
+  _osrc_job_marker_bound "$jd" || return 1
   [ -n "$lane" ] && [ -n "$model" ] || return 1
   while IFS='|' read -r l m; do
     [ -n "$l" ] && [ "$l" = "$lane" ] || continue
     [ -n "$m" ] && [ "$m" != "*" ] && [ "$m" = "$model" ] \
       && { _OSRC_SPEND_MARKER="$mf"; return 0; }
   done < "$mf"
+  return 1
+}
+
+# _osrc_job_marker_bound <jobdir> -> rc0 when this process runs under that job's own supervisor:
+# the engine minted the job (meta.json naming this id) and the recorded supervisor_pid is a live
+# ancestor (same start time when ps can tell). A forged jobs/<x>/.spend-ok plus two env vars, from
+# a process the engine never supervised, consents nothing (live-test F18).
+_osrc_job_marker_bound() {
+  local jd="$1" sp p i=0
+  [ -f "$jd/meta.json" ] && [ "$(jq -r '.id // ""' "$jd/meta.json" 2>/dev/null)" = "${jd##*/}" ] || return 1
+  while [ ! -s "$jd/supervisor_pid" ] && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+  sp="$(tr -d '[:space:]' < "$jd/supervisor_pid" 2>/dev/null)"
+  case "$sp" in ''|*[!0-9]*) return 1 ;; esac
+  _pid_start_file_match "$sp" "$jd/supervisor_pid_start" >/dev/null 2>&1; [ $? -eq 1 ] && return 1
+  p="$PPID"; i=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$i" -lt 32 ]; do
+    [ "$p" = "$sp" ] && return 0
+    if [ -r "/proc/$p/ppid" ]; then p="$(cat "/proc/$p/ppid" 2>/dev/null)"; else p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; fi
+    i=$((i + 1))
+  done
   return 1
 }
 
@@ -577,16 +633,34 @@ _osrc_spend_marker_pairs() {
 _osrc_spend_marker_write() {
   local jd="${1:-}" prov="${2:-}"; shift 2 || true
   [ "${OSRC_SPEND_OK:-0}" = "1" ] && [ -n "$jd" ] && [ -n "${OSRC_JOB_TOKEN:-}" ] || return 0
-  local mf="$jd/.spend-ok"
-  ( umask 077
-    printf '#osrc-spend-ok token=%s\n' "$OSRC_JOB_TOKEN"
-    if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then
-      printf '%s\n' "$_OSRC_PREFLIGHT_PAIR"
-    else
-      _osrc_spend_marker_pairs "$prov" "$@"
-    fi
-  ) > "$mf" 2>/dev/null || true
-  [ -s "$mf" ] || rm -f "$mf" 2>/dev/null
+  local mf="$jd/.spend-ok" pairs
+  if [ -n "${_OSRC_PREFLIGHT_PAIR:-}" ]; then pairs="$_OSRC_PREFLIGHT_PAIR"
+  else pairs="$(_osrc_spend_marker_pairs "$prov" "$@")"; fi
+  _osrc_spend_task_bind "$pairs" || return 0
+  ( umask 077; printf '#osrc-spend-ok token=%s\n%s\n' "$OSRC_JOB_TOKEN" "$pairs" ) > "$mf" 2>/dev/null || true
+  [ -n "$pairs" ] || rm -f "$mf" 2>/dev/null
+}
+
+# _osrc_spend_task_bind <pairs> -> rc0 when a factory task may carry this command's --spend-ok.
+# One factory command (flow/plan run) dispatches every task from a subshell that shares $$, so
+# the FIRST task's lane|model pairs bind the consent for the whole command; a task naming a
+# different paid pair gets no marker, and its job's gate refuses with its own EVENT + NEXT
+# (torture-room arch F5). Outside a factory task (OSRC_TASK_REF unset) this is a no-op.
+_osrc_spend_task_bind() {
+  case "${OSRC_TASK_REF:-}" in ?*/?*) ;; *) return 0 ;; esac
+  [ "${_OSRC_TASK_OWN_CONSENT:-0}" = 1 ] && return 0   # the task's own recorded consent (lib/spend-paths.sh)
+  local bf="$OSRC_HOME/.spend-bind.$$" f p cur
+  for f in "$OSRC_HOME"/.spend-bind.*; do       # prune bindings of commands that have exited
+    [ -f "$f" ] || continue; p="${f##*.}"
+    case "$p" in ''|*[!0-9]*) continue ;; esac
+    kill -0 "$p" 2>/dev/null || rm -f "$f" 2>/dev/null
+  done
+  ( umask 077; set -C; printf '%s\n' "$1" > "$bf" ) 2>/dev/null && return 0
+  cur="$(cat "$bf" 2>/dev/null)"
+  [ "$cur" = "$1" ] && return 0
+  printf '>>> [spend] --spend-ok on this command was given for %s; task %s needs %s, so it asks on its own.\n' \
+    "$(printf '%s' "$cur" | head -n 1)" "$OSRC_TASK_REF" "$(printf '%s' "$1" | head -n 1)" >&2
+  return 1
 }
 
 # Buffer diagnostics while fd 5 keeps an interactive spend prompt on the terminal.
@@ -612,12 +686,17 @@ _osrc_bg_preflight_capture() {
 _osrc_event() {  # <kind> <target> <detail> <next> [src]
   local kind="$1" target="$2" detail="$3" next="$4" src="${5:-spend}"
   local ts; ts="$(date +%s 2>/dev/null || echo 0)"
-  local f="$OSRC_HOME/lanes/events.jsonl"
+  local f="$OSRC_HOME/lanes/events.jsonl" job="" owner=""
   _mkdir_private "$OSRC_HOME/lanes" >/dev/null 2>&1 || true
+  # Stamp who must hear it: a refusal inside a detached job (fanout member, bg child) names its job
+  # and the session that owns that job, so supervise replays it (it keeps owned rows; live-test F7).
+  case "${OSRC_JOB_DIR:-}" in "$OSRC_HOME/jobs/"*) job="${OSRC_JOB_DIR##*/}" ;; esac
+  [ -n "$job" ] && owner="$(_osrc_lane_owner_of "$job" 2>/dev/null)"
+  [ -n "$owner" ] || owner="$(_owner_sid 2>/dev/null)"
   if have jq; then
     jq -cn --argjson ts "$ts" --arg k "$kind" --arg t "$target" --arg d "$detail" \
-      --arg n "$next" --arg s "$src" \
-      '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$s}' >> "$f" 2>/dev/null || true
+      --arg n "$next" --arg s "$src" --arg j "$job" --arg o "$owner" \
+      '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$s} + (if $j == "" then {} else {job:$j} end) + (if $o == "" then {} else {owner:$o} end)' >> "$f" 2>/dev/null || true
   else
     # jq-less fallback: single-line JSON with quotes/backslashes stripped from detail.
     local d1; d1="$(printf '%s' "$detail" | tr '\n"\\' '   ' | cut -c1-300)"
@@ -640,13 +719,14 @@ _osrc_spend_gate() {
   # Devin bills per model: a caller that cannot name the model it launches (a picker choice)
   # gets no Free default. Launch paths with no -m pass the default id itself (lib/spend-paths.sh).
   case "$lane" in dv|devin) [ -n "$model" ] || bill=unknown ;; esac
+  _OSRC_GATE_BILL="$lane|$bill"   # the verdict the banner and receipt repeat (_osrc_gate_paid)
   # unknown is treated as METERED everywhere — cloud sessions included. A hosted
   # session's plan login is proven by the same billing probes as a local launch
   # (claude auth status / codex login status / devin catalog), and hosted-session
   # consent never substitutes for spend approval (CONTRACT.md).
   case "$bill" in subscription|free)
     if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "${_OSRC_SPEND_BOUND_LANE:-}" ]; then
-      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET=""
     fi
     _osrc_preflight_record "$lane" "$model" "${OSRC_SPEND_OK:-0}"
     return 0 ;;
@@ -658,8 +738,13 @@ _osrc_spend_gate() {
   local mname; mname="${model:-}"
   [ -n "$mname" ] || mname="$(_lane_field "$lane" default_model 2>/dev/null)"
   [ -n "$mname" ] || mname="default"
+  # OpenRouter escalates through a chain on transport failure: list it, and bind consent to it.
+  local orset=""; [ "$lane" = or ] && orset="$(_osrc_or_set "$model")"
+  case " $orset " in *" $model "*) [ "$orset" = "$model" ] || why="$why; on transport failure escalates to: ${orset#"$model "}" ;; esac
   if _osrc_spend_ok "$lane" "$model"; then
-    _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+    if [ "${_OSRC_SPEND_BOUND_LANE:-}" != "$lane" ]; then
+      _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET="$orset"
+    fi
     _osrc_preflight_record "$lane" "$model" 1
     # Marker consent is single-use: consume it now that dispatch is committed, so it
     # cannot authorize a second launch (or leak into a sibling job via a shared dir).
@@ -673,6 +758,14 @@ _osrc_spend_gate() {
   local est="" mcost
   mcost="$(_lane_marginal_cost "$lane" "$mname" 1000 2>/dev/null)"
   case "$mcost" in ''|*[!0-9.]*) ;; *) est="$mcost" ;; esac
+  # A refused Devin id that case-folds to a proven-Free id is a typo, not a spend question: point
+  # at the free id instead of offering --spend-ok (live-test F16). The launcher is case-exact.
+  local lower; lower="$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
+  case "$lane" in dv|devin) if [ "$lower" != "$model" ] && _osrc_devin_free_for_spend "$lower"; then
+    local nx="${OSRC_SPEND_NEXT:-$0 run -m $lower}"; nx="${nx// --spend-ok/}"; nx="${nx//"$model"/$lower}"
+    _osrc_event failed "$lane" "case-mismatch:$lane/$model — did you mean $lower (free)?" "$nx" spend >&2
+    die "spend gate: Devin has no free id \"$model\" (ids are case-sensitive). Did you mean $lower (free)? Re-run with -m $lower; no spend consent is needed."
+  fi ;; esac
   local detail="paid-lane:$lane/$mname ($bill) — $why"
   local nexthint="${OSRC_SPEND_NEXT:-$0 --spend-ok}"
   if [ -t 0 ] && { [ -t 2 ] || { [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ -t 5 ]; }; }; then
@@ -683,7 +776,7 @@ _osrc_spend_gate() {
     case "$ans" in
       y|Y|yes|YES)
         OSRC_SPEND_OK=1
-        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"
+        _OSRC_SPEND_BOUND_LANE="$lane"; _OSRC_SPEND_BOUND_MODEL="$model"; _OSRC_SPEND_BOUND_SET="$orset"
         _osrc_preflight_record "$lane" "$model" 1
         printf '>>> [spend] approved for this command only (never persisted).\n' >&"$prompt_fd"
         return 0 ;;
@@ -693,6 +786,29 @@ _osrc_spend_gate() {
   fi
   _osrc_event approval "${lane:-launch}" "$detail" "$nexthint" spend >&2
   die "spend gate: $lname ($disp / $mname) bills $bill and this run is non-interactive — refusing rather than spending silently. Re-run with --spend-ok to approve THIS command only (never persisted), or pick a subscription/free lane."
+}
+
+# _osrc_gate_paid <lane> -> rc0 when this process's spend gate judged <lane> metered/unknown, i.e.
+# the launch runs on spend consent. The free-tier banner and the receipt must not then say "$0 cash"
+# (live-test F8: the consent prompt said metered, the receipt said free). One verdict, the gate's.
+_osrc_gate_paid() {
+  case "${_OSRC_GATE_BILL:-}" in "${1:-}|"*) ;; *) return 1 ;; esac
+  case "${_OSRC_GATE_BILL##*|}" in subscription|free) return 1 ;; esac
+}
+_osrc_receipt_disclosure() {  # <lane> -> the receipt's cost clause
+  if _osrc_gate_paid "${1:-}"; then printf 'billed as paid (%s; approved with --spend-ok)' "${_OSRC_GATE_BILL##*|}"
+  else _lane_cost_disclosure "${1:-}"; fi
+}
+
+# _osrc_or_set <model> -> the OpenRouter models this launch may run, model first: the delegate's own
+# _or_chain (escalation on transport failure) when <model> heads it, else <model> alone. The gate
+# lists the rest in its prompt and binds consent to exactly this set (torture-room arch F6).
+_osrc_or_set() {
+  local m="${1:-}" c rest=""
+  c="$(_or_chain "${tier:-auto}" 2>/dev/null)" || c=""
+  case "$c" in "$m"|"$m "*) ;; *) printf '%s' "$m"; return 0 ;; esac
+  for c in $c; do [ "$c" = "$m" ] || rest="$rest $c"; done
+  printf '%s%s' "$m" "$rest"
 }
 
 # _osrc_session_spend_gate -> session-start form: resolves PROVIDER to its native
@@ -858,3 +974,14 @@ _osrc_claude_plan_login() {
 # The implementation moved to lib/limits.sh with the rest of the meter readers; this
 # alias keeps the old entry point working. `lane summary` is the CLI surface.
 osrc_limits_summary() { osrc_lane_summary "$@"; }
+
+# _osrc_spend_libs_ok -> rc0 when every spend-path lib loaded WHOLE: each ends with a sentinel
+# line, so a missing, unreadable or truncated lib (bash drops everything after a syntax error)
+# fails this. outsourcerer.sh's lib loader then swaps every gate entry point for a refusal, so a
+# half-installed update refuses launches instead of skipping the gate (torture-room arch F2).
+_OSRC_SPEND_GATE_FNS="_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate"
+_osrc_spend_libs_ok() {
+  [ "${_OSRC_LIBEND_SPEND:-}${_OSRC_LIBEND_SPENDPATHS:-}${_OSRC_LIBEND_DEVINFREE:-}${_OSRC_LIBEND_CAPS:-}" = 1111 ] || return 1
+  declare -F $_OSRC_SPEND_GATE_FNS >/dev/null 2>&1
+}
+_OSRC_LIBEND_SPEND=1   # last line: the loader proves this lib loaded whole

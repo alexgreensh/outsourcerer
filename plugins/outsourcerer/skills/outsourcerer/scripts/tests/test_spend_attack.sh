@@ -26,8 +26,12 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 TMP="$(mktemp -d "${TMPDIR%/}/osrc-spendatk.XXXXXX")"
 unset TMUX   # never reach a real tmux server from inside a pane; every server here lives under $TMP
-tkill() { env -u TMUX TMUX_TMPDIR="$TMP" tmux kill-server >/dev/null 2>&1; }
-trap 'tkill; rm -rf "$TMP"' EXIT
+# tmux's socket lives in a SHORT dir of its own: a unix socket path is capped (104 bytes on macOS,
+# 108 on Linux), and $TMP under a long TMPDIR (a Mac scratchpad) made every tmux new-session fail,
+# so the two launching session-start cases returned rc 4 on the host, not on the product.
+TSOCK="$(mktemp -d "/tmp/osrc-sa.XXXXXX")" || { echo "FAIL: cannot create a short tmux socket dir"; exit 1; }
+tkill() { env -u TMUX TMUX_TMPDIR="$TSOCK" tmux kill-server >/dev/null 2>&1; }
+trap 'tkill; rm -rf "$TMP" "$TSOCK"' EXIT
 export HOME="$TMP/home"; mkdir -p "$HOME"
 DOH="$TMP/osrc"; OFF="$TMP/osrc-off"; DBIN="$TMP/bin"; LOG="$TMP/argv.log"
 for d in "$DOH" "$OFF"; do
@@ -59,8 +63,8 @@ exit 0
 EOF
 chmod +x "$DBIN/devin" "$DBIN/claude"
 # Catalog: swe-1.7 has ONE Free variant; every other variant is paid in a different malformed way.
-# swe-2-1 is newer, has a PAID -high (Fusion text says Free) and a Free -max, so `-m swe` resolves
-# to the paid swe-2-1-high.
+# swe-2-1 is newer, has a PAID -high (Fusion text says Free) and a Free but unlaunchable -none, so
+# even with cost ranked before effort (PR #88) `-m swe` resolves to the paid swe-2-1-high.
 cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
 {"families":[
  {"family_uid":"swe-1.7","aliases":[],"variants":[
@@ -73,16 +77,16 @@ cat > "$DOH/catalogs/dv.raw.json" <<'EOF'
    {"model_uid":"swe-1-7-promo","cost_tier":1,"cost_summary":"promo: free this week"}]},
  {"family_uid":"swe-2-1","aliases":["swe"],"variants":[
    {"model_uid":"swe-2-1-high","cost_tier":"High cost","cost_summary":"$8/MTok · Sidekick: Free"},
-   {"model_uid":"swe-2-1-max","cost_tier":"Free"}]}]}
+   {"model_uid":"swe-2-1-none","cost_tier":"Free"}]}]}
 EOF
-printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-1-7-xhigh","swe-1-7-low","swe-1-7-medium","swe-1-7-none","swe-1-7-promo","swe-2-1","swe-2-1-high","swe-2-1-max","swe"]\n' \
+printf '["swe-1.7","swe-1-7-high","swe-1-7-max","swe-1-7-xhigh","swe-1-7-low","swe-1-7-medium","swe-1-7-none","swe-1-7-promo","swe-2-1","swe-2-1-high","swe-2-1-none","swe"]\n' \
   > "$DOH/catalogs/dv.json"
 
 engine() {  # real engine against the stubs, non-interactive (stdin /dev/null); HOME_DIR picks OSRC_HOME
   ( cd "$TMP" && STUB_LOG="$LOG" DEVIN_STUB_CATALOG="${CAT-$DOH/catalogs/dv.raw.json}" \
       PATH="$DBIN:$PATH" HOME="$HOME" OSRC_HOME="${HOME_DIR:-$DOH}" OSRC_SOURCED= OSRC_CATALOG_TTL=999999 \
       OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_PROVIDER=devin OSRC_CLOUD_ACK=1 OSRC_NO_AUTODETACH=1 \
-      TMUX= TMUX_TMPDIR="$TMP" bash "$SRC" "$@" 2>&1 </dev/null )
+      TMUX= TMUX_TMPDIR="$TSOCK" bash "$SRC" "$@" 2>&1 </dev/null )
 }
 offline() { CAT=/dev/null HOME_DIR="$OFF" engine "$@"; }
 inproc() {  # source the engine and run a snippet (functions in-process)
@@ -122,8 +126,15 @@ for m in SWE-1.7-HIGH swe-1.7-high Swe-1-7-High; do
   [ "$ids" = "swe-1-7-high " ] && [ "$rc" -eq 0 ] && ok "spell:$m launched exactly the judged Free id swe-1-7-high" \
     || bad "spell:$m launched '$ids' (rc=$rc)"
 done
-# Offline: nothing maps the spelling, so the CLI gets it verbatim; it must be judged verbatim too.
-for m in SWE-2-HIGH swe.2.high Swe-2-High; do
+# Offline, a case-only variant folds to the alias table's exact id (live-test F16): it launches
+# exactly the judged Free swe-2-high, never the raw spelling.
+for m in SWE-2-HIGH Swe-2-High; do
+  : > "$LOG"; out="$(offline run -m "$m" "say hi")"; rc=$?
+  [ "$(launched_ids | tr '\n' ' ')" = "swe-2-high " ] && [ "$rc" -eq 0 ] && ok "spell:offline $m launches exactly the judged Free swe-2-high" \
+    || bad "spell:offline $m launched '$(launched_ids | tr '\n' ' ')' (rc=$rc)"
+done
+# Offline, nothing maps a dot spelling, so the CLI gets it verbatim; it must be judged verbatim too.
+for m in swe.2.high; do
   : > "$LOG"; out="$(offline run -m "$m" "say hi")"; rc=$?
   refuses_paid "spell:offline $m (launches verbatim) is not judged as swe-2-high" "$out" "$rc" "$m"
   : > "$LOG"; out="$(offline run --spend-ok -m "$m" "say hi")"; rc=$?
@@ -160,14 +171,14 @@ tkill
 : > "$LOG"; out="$(engine continue "follow up")"; rc=$?
 ids="$(launched_ids | tr '\n' ' ')"
 case "$ids" in
-  "swe-1-7-high "|"swe-2-1-max ") ok "default:bare continue launches the judged Free default ($ids)" ;;
+  "swe-1-7-high ") ok "default:bare continue launches the judged Free default ($ids)" ;;
   *) bad "default:bare continue launched --model '$ids' (rc=$rc; empty = Devin picks, unjudged)" ;;
 esac
 : > "$LOG"; out="$(engine session start)"; rc=$?
 wait_log 'respect-workspace-trust' || true
 sm="$(grep -E -- '--respect-workspace-trust' "$LOG" | sed -nE "s/.*--model ([^ ]*) .*/\1/p" | head -1)"
 case "$sm" in
-  swe-1-7-high|swe-2-1-max) ok "default:bare session start launches the judged Free default ($sm)" ;;
+  swe-1-7-high) ok "default:bare session start launches the judged Free default ($sm)" ;;
   *) bad "default:bare session start launched --model '$sm' (rc=$rc)" ;;
 esac
 tkill
@@ -217,6 +228,11 @@ cp "$DOH/jobs/j1/.spend-ok" "$TMP/elsewhere/.spend-ok"
 refuses_paid "once:a job marker with another job's token grants nothing" "$out" "$rc" swe-1-7-max
 : > "$LOG"; out="$(export OSRC_JOB_DIR="$TMP/elsewhere" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
 refuses_paid "once:a marker outside the jobs dir grants nothing" "$out" "$rc" swe-1-7-max
+# A marker + token alone (no job the engine minted, no supervisor ancestor) is a forgery (live F18).
+: > "$LOG"; out="$(export OSRC_JOB_DIR="$DOH/jobs/j1" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
+refuses_paid "once:a forged job dir (no meta.json / supervisor) grants nothing" "$out" "$rc" swe-1-7-max
+# The job record a real bg launch leaves: meta.json naming the job, supervisor pid = an ancestor.
+printf '{"id":"j1"}\n' > "$DOH/jobs/j1/meta.json"; echo "$$" > "$DOH/jobs/j1/supervisor_pid"
 # The right token (the bg child's own secret) consents ONCE: the marker is consumed.
 : > "$LOG"; out="$(export OSRC_JOB_DIR="$DOH/jobs/j1" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
 launched swe-1-7-max && ok "once:the job's own marker consents its one bound launch" || bad "once:job marker launch failed (rc=$rc)"
@@ -255,6 +271,18 @@ if wait_log 'swe-1-7-max --respect' && [ "$rc" -eq 0 ]; then
   if grep -q 'tui-input' "$LOG"; then bad "model:bare session model drove the picker with no consent (choice unknown)"
   else case "$out" in *"spend gate"*) ok "model:bare session model (unknown pick) asks first" ;;
     *) bad "model:bare no refusal (rc=$rc): $(printf '%s' "$out" | tail -2)" ;; esac; fi
+  # session send "/model X" drives the same picker: same gate, any case, leading blanks (live-test F3)
+  for txt in "/model swe-2-1-high" "  /MODEL swe-2-1-high"; do
+    : > "$LOG"; out="$(engine session send "$txt")"; rc=$?; sleep 1
+    if grep -qi 'tui-input.*/model' "$LOG"; then bad "send-model:'$txt' typed a paid switch into the pane with no consent"
+    else case "$out" in *"paid-lane:"*swe-2-1-high*"NEXT "*"session model swe-2-1-high"*) ok "send-model:'$txt' asks first, NEXT is session model" ;;
+      *) bad "send-model:'$txt' no refusal (rc=$rc): $(printf '%s' "$out" | tail -2)" ;; esac; fi
+  done
+  for txt in "/model" "/model swe-2-1-high please"; do
+    : > "$LOG"; out="$(engine session send "$txt")"; rc=$?; sleep 1
+    if [ "$rc" -ne 0 ] && ! grep -qi 'tui-input.*/model' "$LOG" && grep -q 'session model <name>' <<<"$out"; then ok "send-model:'$txt' (unknown pick) refused, names session model"
+    else bad "send-model:'$txt' rc=$rc out=$(printf '%s' "$out" | tail -1)"; fi
+  done
   sleep 1; : > "$LOG"
   out="$(engine session control relaunch)"; rc=$?
   sleep 1

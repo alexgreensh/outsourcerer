@@ -358,12 +358,28 @@ on use, and delegates never inherit `OSRC_JOB_DIR` so a nested Outsourcerer call
 a parent's consent. Auto-routing and every fallback picker skip metered/unknown lanes unless
 the command already carries consent; when only paid lanes remain, the run stops and asks
 instead of picking OpenRouter quietly.
+Consent names what it was shown and nothing more: an OpenRouter consent covers the chain
+the prompt listed ("on transport failure escalates to: ..."), never a model outside it; a factory
+command's one `--spend-ok` binds to the first task's `lane|model`, and a task on a different paid
+model asks on its own. The Devin health probe (`doctor`, limit checks) sends a request with no
+prompt, so it pings only an id with the spend gate's own Free proof or the plan-included
+`glm-5-2`; an `OSRC_DEVIN_PROBE_MODEL` without that proof is skipped. A cap that cannot be
+verified (no fresh meter reading, or a malformed spec such as `weekly<=4O`) refuses an auto
+launch on that lane (hop, else refuse; `--force-lane` overrides). If a spend or cap library is
+missing or damaged (an interrupted update), every launch refuses with exit 70 until reinstall.
 
 `OUTSOURCERER_MODEL` sets the script-level `DEFAULT_MODEL` fallback only: lanes with a
 descriptor `default_model` use theirs, and `dv` ignores it entirely — a bare Devin run
 picks its model at run time from the live catalog's exact Free set — newest mainline
 `-high` first, then the strongest/newest Free id, with `swe-2-high` only as the offline
-fallback — so the env var never reaches a `dv` dispatch. Pin Devin explicitly with `-m <free-id>`.
+fallback (announced on stderr when used) — so the env var never reaches a `dv` dispatch.
+Pin Devin explicitly with `-m <free-id>`. Version recency inside that ranking is
+family-scoped (across families the catalog's own order decides; date-like digit runs are
+not versions). Two invariants close the loop on aliases: the spend gate classifies the
+exact id dispatch will launch — it resolves the same `-m` token through the same
+deterministic path, never a separate table id — and cost outranks effort inside a
+family, so a bare alias lands on a free `-max` rather than a paid `-high` when a family
+is mixed. A paid resolution is never silently launched either way: the gate asks.
 
 Per-lane usage caps: `--cap <meter><=<pct>` (repeatable; `weekly<=40`, `5h<=80`, or a raw window
 name — the pct must be a real number 0-100) on `run`/`bg`/`fanout`/`session start`, or standing

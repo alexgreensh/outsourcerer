@@ -24,7 +24,7 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 # Each case runs in its own OSRC_HOME so "did a job dir appear?" is an exact question.
 # cmd_bg is invoked in a SUBSHELL because it `die`s, and die exits the process.
 try_bg() {   # <desc> -> echoes "<exit>|<jobdirs>"
-  local sandbox; sandbox="$(mktemp -d)"
+  local sandbox; sandbox="$(mktemp -d)"; mkdir -p "$sandbox/disk-policy"; printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$sandbox/disk-policy/settings"
   mkdir -p "$sandbox/home"
   local out rc
   out="$( HOME="$sandbox/home" OSRC_HOME="$sandbox" bash "$SRC" bg "$@" 2>&1 )"; rc=$?
@@ -71,7 +71,7 @@ esac
 # caller got an id and a "launched" line for a combination that could never run. Only invalid cases are
 # exercised here — they die before any dispatch, so this suite never spends quota or touches the network.
 try_bg_acked() {   # <args...> -> "<exit>|<jobdirs>|<output>"
-  local sandbox; sandbox="$(mktemp -d)"
+  local sandbox; sandbox="$(mktemp -d)"; mkdir -p "$sandbox/disk-policy"; printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$sandbox/disk-policy/settings"
   mkdir -p "$sandbox/home"
   local out rc
   out="$( HOME="$sandbox/home" OSRC_HOME="$sandbox" OSRC_CLOUD_ACK=1 bash "$SRC" bg "$@" 2>&1 )"; rc=$?

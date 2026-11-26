@@ -171,7 +171,7 @@ bash "$SRC" cleanup "$rid" --force >/dev/null 2>&1
 grep -q '^a2' "$cap" 2>/dev/null && ok "delegate sees the uncommitted same-size edit" || bad "delegate missed the uncommitted edit: $(tail -1 "$cap" 2>/dev/null)"
 
 echo "=== structural ==="
-{ _t3b_pipe="$(awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$RESOLVED_ID"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC")" && grep -qx ok <<<"$_t3b_pipe"; } \
+{ _t3b_pipe="$(awk '/^route_delegate\(\)/{r=1} r && /_cloud_autoisolate "\$disp"/{a=NR} r && /_cloud_disclose "\$disp" "\$_gate_model"/{print (a && a<NR) ? "ok" : "bad"; exit}' "$SRC")" && grep -qx ok <<<"$_t3b_pipe"; } \
   && ok "route_delegate isolates right before the cloud gate" || bad "route_delegate does not call _cloud_autoisolate before _cloud_disclose"
 
 echo ""

@@ -366,7 +366,7 @@ _task_update() {
 
 # Fields a caller of _task_new may not set: identity, bookkeeping the dispatcher and done contract own,
 # and landing records. They are reset to their defaults whatever the caller passed.
-_FACTORY_TASK_PROTECTED='["schema","id","plan","attempts","job","jobs","worktree","branch","base_sha","head_sha","evidence","created","updated","landed","landed_into","landed_sha","pr","claimed_at","claimed_by","launch_failed"]'
+_FACTORY_TASK_PROTECTED='["schema","id","plan","attempts","job","jobs","worktree","branch","base_sha","head_sha","evidence","created","updated","landed","landed_into","landed_sha","pr","claimed_at","claimed_by","launch_failed","spend_ok"]'
 
 # _task_new <plan> <json-object> -> allocate the next tid under the lock, merge the fields over the
 # defaults, validate deps exist, write the task, print the tid. Deps can only name tasks that already
@@ -758,6 +758,7 @@ _task_dispatch() {
   local -a args=()
   [ -n "$provider" ] && args+=(--provider "$provider")
   args+=("$verb")
+  _osrc_task_spend_own "$t" "$model" && args+=(--spend-ok)
   [ -n "$model" ] && args+=(-m "$model")
   args+=("$prompt")
 
@@ -1083,9 +1084,10 @@ _task_cli_args() {
 _task_cli_add() {
   _task_cli_args "$@"; set -- ${_TASK_ARGV[@]+"${_TASK_ARGV[@]}"}
   local plan="$_TASK_PLAN" title="" prompt="" shape="" deps="" spec="" check="" verb="" model="" provider=""
-  local deliver="local" retries=1 hold="" flow="" stage="" files="" fields tid
+  local deliver="local" retries=1 hold="" flow="" stage="" files="" fields tid sok="${OSRC_SPEND_OK:-0}"
   while [ $# -gt 0 ]; do
     case "$1" in
+      --spend-ok) sok=1; shift ;;   # per-task consent: covers exactly this task's -m (lib/spend-paths.sh)
       --prompt) _factory_optval "$1" $#; prompt="$2"; shift 2 ;;
       --prompt-file) _factory_optval "$1" $#; [ -f "$2" ] || die "task add: no such prompt file '${2:-}'"; prompt="$(cat "$2")"; shift 2 ;;
       --shape) _factory_optval "$1" $#; shape="$2"; shift 2 ;;
@@ -1137,6 +1139,7 @@ _task_cli_add() {
     + (if $hold != "" then {state:"held",hold:{reason:$hold,until:"",answer:""}} else {} end)
     + (if $files != "" then {files:($files | split("\n") | map(gsub("^\\s+|\\s+$";"") | sub("^\\./+";"") | sub("/+$";"") | select(. != "")) | unique)} else {} end)')"
   tid="$(_task_new "$plan" "$fields")" || exit 1
+  [ "$sok" = 1 ] && { _osrc_task_spend_record "$plan" "$tid" "$model" || exit 1; }
   printf '%s\n' "$tid"
   echo "added $tid to plan '$plan' ($shape)${deps:+, after $(printf '%s' "$deps" | tr '\n' ' ' | sed 's/ $//;s/ /, /g')}${hold:+, held for a decision}." >&2
 }

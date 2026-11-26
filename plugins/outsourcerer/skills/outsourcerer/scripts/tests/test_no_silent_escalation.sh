@@ -16,6 +16,7 @@ trap cleanup EXIT
 
 # Load the source so the functions are defined. main is not run.
 . "$SRC" >/dev/null 2>&1
+OSRC_SPEND_OK=1   # these cases drive delegate_* directly; consent stands in for route_delegate's spend gate
 
 pass=0; fail=0
 ok()  { echo PASS: $1; pass=$((pass+1)); }
@@ -73,6 +74,7 @@ else
 fi
 
 # === Scenario 6: codex->cc self-heal is gated by --allow-downgrade. ===
+unset _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET   # a new command, a new consent
 # Mock the codex CLI so delegate_codex sees a tool-type-400 failure.
 OSRC_ALLOW_DOWNGRADE=0
 unset REST
