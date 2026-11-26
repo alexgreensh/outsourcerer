@@ -277,7 +277,7 @@ _sv_observe() { # <id> <now> [src] [owner]
   # Disk-paused (SIGSTOPped by lib/disk_policy.sh): its screen and log are frozen on purpose. Owed a
   # waiter, one `disk-paused` event per pause (hourly reminder), no nudge, and the stall clock restarts so a
   # resumed lane is never read as stalled for the time it spent paused.
-  if type _osrc_disk_target_paused >/dev/null 2>&1 && _osrc_disk_target_paused "$id"; then
+  if type _osrc_disk_target_paused >/dev/null 2>&1 && _osrc_disk_target_paused "$id" && _osrc_disk_paused_live "$id"; then
     _sv_state_read "$id"; SV_OUT=1; SV_PEND=1; SV_K=disk-paused; SV_H="disk.$(_osrc_disk_pause_since "$id")"; SV_RM=3600
     SV_D="$(_osrc_disk_paused_note "$id")"; SV_NX="$SCRIPT_PATH disk status"
     SVS_CHANGED="$now"; SVS_CK=-; _sv_state_write "$id"; return 0

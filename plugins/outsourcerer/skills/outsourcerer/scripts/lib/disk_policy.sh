@@ -441,7 +441,8 @@ _osrc_disk_resume_rec() {
   [ -f "$rec" ] || return 0
   case "$rec" in */disk-paused)
     jd="${rec%/disk-paused}"; t="$rec.${_OSRC_DISK_ME:-$$}"   # a failed rewrite keeps the old record
-    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null || banked=0
+    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null \
+      && rm -f "$jd"/disk-paused.unbanked.* 2>/dev/null || banked=0   # now inside the bank
     [ "$banked" = 1 ] \
       && grep -v '^since|' "$rec" > "$t" 2>/dev/null && mv -f "$t" "$rec" 2>/dev/null || rm -f "$t" 2>/dev/null ;;
   esac
@@ -461,8 +462,12 @@ _osrc_disk_resume_rec() {
   fi
   while IFS='|' read -r a b c; do [ -n "$a" ] && _osrc_disk_pane_restore "$a" "$b" "$c" "$live"; done <<<"$panes"
   [ -n "$jd" ] && _osrc_disk_keepalive "$jd" resumed
-  # Bank lost (full disk): keep the record so its since line still shifts the job's clocks.
-  [ "$banked" = 1 ] && rm -f "$rec" 2>/dev/null
+  # Bank lost (full disk): a rename needs no new data blocks. disk-paused.unbanked
+  # (named .<pid>.<epoch>) keeps the pause span for the job's clocks without reading as paused; the record stays only
+  # if even the rename fails.
+  [ "$banked" = 1 ] && { rm -f "$rec" 2>/dev/null; return 0; }
+  [ -n "$jd" ] && mv -f "$rec" "$jd/disk-paused.unbanked.${_OSRC_DISK_ME:-$$}.$(date +%s)" 2>/dev/null
+  return 0
 }
 
 _osrc_disk_resume_all() {
@@ -474,10 +479,14 @@ _osrc_disk_resume_all() {
 # _osrc_disk_paused_secs <jd> -> total seconds the job has spent disk-paused, including an
 # ongoing pause. The watchdog subtracts this from its wall-clock deadlines.
 _osrc_disk_paused_secs() {
-  local t s
+  local t s f e
   t="$(cat "$1/disk-paused-secs" 2>/dev/null)"; case "$t" in ''|*[!0-9]*) t=0 ;; esac
   s="$(sed -n 's/^since|//p' "$1/disk-paused" 2>/dev/null)"
   case "$s" in ''|*[!0-9]*) : ;; *) t=$(( t + $(date +%s) - s )) ;; esac
+  for f in "$1"/disk-paused.unbanked.*; do   # pauses whose bank write failed (full disk)
+    [ -f "$f" ] || continue; e="${f##*.}"; s="$(sed -n 's/^since|//p' "$f" 2>/dev/null)"
+    case "$e:$s" in *[!0-9:]*|:*|*:) continue ;; esac; [ "$e" -ge "$s" ] && t=$(( t + e - s ))
+  done
   printf '%s' "$t"
 }
 
@@ -541,12 +550,12 @@ _osrc_disk_episode_end() { rm -f "$(_osrc_disk_dir)/.episode" "$(_osrc_disk_dir)
 
 # ---- merged-lane auto-reclaim -------------------------------------------------------------
 
-# _osrc_disk_lane_sha <repo> <branch> <base> -> the branch tip, only when it is preserved
+# _osrc_disk_lane_sha <repo> <branch> -> the branch tip, only when it is preserved
 # on main/remote (or a tip-matched merged PR) and did not move during the proof.
 _osrc_disk_lane_sha() {
   local sha
   sha="$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" || return 1
-  _osrc_branch_merged "$1" "$2" "$3" || return 1
+  _osrc_branch_merged "$1" "$2" || return 1   # never a 3rd arg: that is the --any-ref switch
   [ "$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" = "$sha" ] && printf '%s' "$sha"
 }
 
@@ -557,15 +566,15 @@ _osrc_disk_cl_log() { printf '%s\t%s\tdisk-policy\t%s\n' "$(date -u +%Y-%m-%dT%H
 # every visible file is tracked at a preserved commit), then the recorded branch (conditional
 # on the proven commit and not checked out anywhere).
 _osrc_disk_reclaim_lane() {
-  local s="$1" items="$2" wj br base repo wt sha pp n=0 k
+  local s="$1" items="$2" wj br repo wt sha pp n=0 k
   wj="$OSRC_JOBS/$s/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$s/worktree.json"
-  br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
+  br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"
   [ -n "$br" ] || { printf 0; return 0; }
   # Any worktree of this lane that is not SAFE (dirty, live owner...) keeps the whole lane.
   [ -z "$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="ASK") | .path' 2>/dev/null)" ] || { printf 0; return 0; }
   repo="$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and (.kind=="worktree" or .kind=="branch")) | .repo' 2>/dev/null | head -1)"
   [ -n "$repo" ] || { printf 0; return 0; }
-  sha="$(_osrc_disk_lane_sha "$repo" "$br" "$base")" || { printf 0; return 0; }
+  sha="$(_osrc_disk_lane_sha "$repo" "$br")" || { printf 0; return 0; }
   wt="$(printf '%s\n' "$items" | jq -c --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="SAFE")' 2>/dev/null | head -1)"
   if [ -n "$wt" ]; then
     [ "$(_osrc_cleanup_verdict "$(jq -c 'del(.verdict,.why,.size_kb)' <<<"$wt")" 2>/dev/null | cut -f1)" = SAFE ] || { printf 0; return 0; }
@@ -806,6 +815,27 @@ _osrc_disk_target_paused() {
   case "${1:-}" in ''|*/*) return 1 ;; esac
   [ -f "$OSRC_JOBS/$1/disk-paused" ] && grep -q '^since|' "$OSRC_JOBS/$1/disk-paused" 2>/dev/null && return 0
   [ -f "$(_osrc_disk_dir)/paused/tmux-$1" ]
+}
+
+# _osrc_disk_paused_live <id> -> 0 when <id>'s pause record still names a SIGSTOPped process, is
+# under a minute old (a pause still being written), or `ps -o stat=` cannot tell; it then makes sure
+# a monitor exists to resume it (a SIGKILLed monitor leaves lanes stopped). 1 when the record is
+# stale (nothing it names is stopped, e.g. a tmux session killed while paused): retired here.
+_osrc_disk_paused_live() {
+  local rec tag role pid grp sid st since
+  rec="$OSRC_JOBS/${1:-}/disk-paused"; [ -f "$rec" ] || rec="$(_osrc_disk_dir)/paused/tmux-${1:-}"
+  [ -f "$rec" ] || return 1
+  since="$(_osrc_disk_pause_since "$1")"; case "$since" in ''|*[!0-9]*) since=0 ;; esac
+  [ $(( $(date +%s) - since )) -ge 60 ] && [ -n "$(ps -o stat= -p "$$" 2>/dev/null)" ] \
+    || { _osrc_disk_heartbeat >/dev/null 2>&1; return 0; }
+  while IFS='|' read -r tag role pid grp sid; do
+    [ "$tag" = proc ] && _osrc_disk_same "$pid" "$sid" || continue
+    st="$(ps -o stat= -p "$pid" 2>/dev/null)"
+    case "$st" in *T*) _osrc_disk_heartbeat >/dev/null 2>&1; return 0 ;; esac
+  done < "$rec"
+  _osrc_disk_log "stale pause record $rec: nothing it names is stopped; retired"
+  _osrc_disk_resume_rec "$rec" >/dev/null 2>&1
+  return 1
 }
 
 _osrc_disk_pause_since() { sed -n 's/^since|//p' "$OSRC_JOBS/$1/disk-paused" "$(_osrc_disk_dir)/paused/tmux-$1" 2>/dev/null | head -1; }

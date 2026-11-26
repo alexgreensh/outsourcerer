@@ -381,10 +381,12 @@ LE="$TMP/lke"; mkdir -p "$LE/disk-policy/monitor.lock"; : > "$LE/disk-policy/mon
 sleep 300 & LW=$!; KILL="$KILL $LW"; disown "$LW" 2>/dev/null
 w="$(osrc "$LE" '_OSRC_DISK_ME='"$LW"'; _OSRC_DISK_ME_ID="$(_pid_start_identity '"$LW"')"; _osrc_disk_lock_take && echo won')"
 [ "$w" = won ] && [ "$(owner_pid "$LE")" = "$LW" ] && ok "empty owner file is dead: a new monitor claims the lock" || bad "empty owner locked out the monitor: '$w'"
-# P2: when banking pause time fails on resume, the record stays so the watchdog still shifts its clocks.
+# P2: when banking pause time fails on resume, the watchdog still shifts its clocks by the span
+# (kept as disk-paused.unbanked.*), but the resumed job no longer reads as paused (review F16).
 BJ="$TMP/bank/jobs/j1"; mkdir -p "$BJ/disk-paused-secs"; printf 'since|%s\n' "$(( $(date +%s) - 30 ))" > "$BJ/disk-paused"
 osrc "$TMP/bank" '_osrc_disk_resume_rec "'"$BJ"'/disk-paused"' >/dev/null 2>&1
-grep -q '^since|' "$BJ/disk-paused" 2>/dev/null && ok "failed bank keeps the pause record and its since line" || bad "record dropped after a failed bank: job would be killed"
+bs="$(osrc "$TMP/bank" '_osrc_disk_paused_secs "'"$BJ"'"' 2>/dev/null)"
+[ ! -f "$BJ/disk-paused" ] && [ "${bs:-0}" -ge 30 ] && ok "failed bank keeps the pause span ($bs s) without the paused record" || bad "failed bank: record=$([ -f "$BJ/disk-paused" ] && echo kept) span=$bs: job would be killed or shown paused"
 
 kill $LV $LW 2>/dev/null   # the fake lock owners above
 block "incident 3: merged-lane reclaim"
