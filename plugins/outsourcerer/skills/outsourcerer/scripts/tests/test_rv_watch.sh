@@ -36,6 +36,31 @@ printf 'reading the parser\n' > "$jd/progress"
 o="$(osrc "$H" "_status_line $J")"
 grep -q "^$J running .*reading the parser" <<<"$o" && ok "running job shows its progress" || bad "status: $o"
 
+# ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
+RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
+REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid GIT_TERMINAL_PROMPT=0
+git init -q --bare "$REMOTE"; git clone -q "$REMOTE" "$WORK" 2>/dev/null
+( cd "$WORK" && git checkout -q -b main && echo base > f.txt && git add f.txt && git commit -q -m base && git push -q origin main )
+# rv <code>: run code in a shell with the engine sourced against the remote-lane home
+rv() {
+  OSRC_HOME="$RH" OSRC_SOURCED=1 OSRC_TIME_UNIT=1 OSRC_REMOTE_POLL_SECS=0 OSRC_SELF=osrc OSRC_STOP_GUARD=1 \
+    OSRC_CARD_GUARD=0 CLAUDE_CODE_SESSION_ID=sess-rv bash -c 'c="$1"; set --; . "$0" >/dev/null 2>&1; eval "$c"' "$SRC" "$1" 2>&1
+}
+# rpush <branch> <message> <setup-shell> -> commit what setup-shell writes and push it
+rpush() {
+  ( cd "$WORK" && { git checkout -q "$1" 2>/dev/null || git checkout -q -b "$1" main; } && eval "$3" \
+    && git add -A >/dev/null && git commit -q -m "$2" && git push -q origin "$1" 2>/dev/null && git rev-parse HEAD )
+}
+
+echo "=== F17: a READY tip whose commit touches 20000 files is still READY ==="
+export NOW0=1000000
+rv "OSRC_NOW=$NOW0 cmd_lane add big1 --branch cloud/big1 --repo '$REMOTE'" >/dev/null
+rpush cloud/big1 "vendor everything" 'mkdir -p zz; i=0; while [ $i -lt 20000 ]; do : > zz/vendored_file_$i.txt; i=$((i+1)); done; echo "READY big1" > big1.READY' >/dev/null
+o="$(rv "OSRC_NOW=$((NOW0+60)) osrc_remote_events")"
+[ "$(jq -r .head_ready "$RH/remote/big1.json")" = true ] && grep -q '^EVENT done big1 .*READY' <<<"$o" \
+  && ok "head_ready=true and a done READY event" || bad "big READY tip missed: ready=$(jq -r .head_ready "$RH/remote/big1.json") events: $o"
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

@@ -244,17 +244,17 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     # make every later push READY. The gh path gets the same list from the commits response (.files).
     names="$(git --git-dir="$cache" diff-tree --no-commit-id --name-only -r --root "$head" 2>/dev/null)"
   fi
-  if _osrc_msg_ready "$msg" "$marker" || printf '%s\n' "$names" | grep -qxE "$marker|$id\\.$marker"; then
+  if _osrc_msg_ready "$msg" "$marker" || grep -qxE "$marker|$id\\.$marker" <<<"$names"; then
     ready=true
   fi
   # A push that writes the lane's own <id>.READY or <id>.RESULT onto a tree carrying both (a RESULT
   # committed after its READY, or both landing between two polls) is READY at this head: queued for
   # review like any READY tip, so it is neither stalled nor left with nobody woken.
   local tree=""
-  if [ "$ready" != true ] && printf '%s\n' "$names" | grep -qxF -e "$id.READY" -e "$id.RESULT"; then
+  if [ "$ready" != true ] && grep -qxF -e "$id.READY" -e "$id.RESULT" <<<"$names"; then
     if [ "$transport" = gh ]; then tree="$(_osrc_net gh api "repos/$url/git/trees/$head" --jq '.tree[].path' 2>/dev/null)"
     else tree="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"; fi
-    printf '%s\n' "$tree" | grep -qxF "$id.READY" && printf '%s\n' "$tree" | grep -qxF "$id.RESULT" && ready=true
+    grep -qxF "$id.READY" <<<"$tree" && grep -qxF "$id.RESULT" <<<"$tree" && ready=true
   fi
   sha7="${head:0:7}"
   _osrc_jq_set "$f" --arg head "$head" --arg msg "$(printf '%s' "$msg" | head -1 | cut -c1-160)" \
