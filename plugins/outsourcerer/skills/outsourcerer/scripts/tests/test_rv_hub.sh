@@ -162,5 +162,17 @@ if on F41; then
   [ "$b" = '#9' ] && ok "F41: with the card's repo the PR is found" || no "F41: own repo PR reads $b"
 fi
 
+if on F42; then
+  # A pr:/check: contract that is already met: the one-shot `hub export` asks it now; only the serve loop
+  # (OSRC_HUB_FAST=1) answers from the last verdict and queues the refresh.
+  mkdir -p "$OSRC_HOME/done" "$OSRC_HOME/hub/cache/scr"
+  echo '{"spec":"pr:acme/widget#7","cwd":"/"}' > "$OSRC_HOME/done/d42.json"
+  q='osrc_done_state() { echo done; }; _osrc_done_cache_peek() { :; }; _osrc_hub_memo_begin; osrc_done_state d42; _osrc_hub_memo_end'
+  a="$(OSRC_HUB_FAST=0 lib eval "$q")"; b="$(OSRC_HUB_FAST=1 lib eval "$q")"
+  [ "$a" = done ] && ok "F42: a one-shot export resolves an uncached pr: contract inline" || no "F42: one-shot reads $a"
+  [ "$b" = not-done ] && ok "F42: the serve loop keeps the cached, queued path" || no "F42: serve loop reads $b"
+  rm -f "$OSRC_HOME"/hub/cache/scr/.dwant.*
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

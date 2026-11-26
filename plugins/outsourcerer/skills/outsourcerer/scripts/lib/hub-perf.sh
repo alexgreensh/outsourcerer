@@ -81,7 +81,8 @@ _osrc_hub_memo_begin() {
   # Done contracts, once per lane. check:/pr: answer from their last verdict (the probe clones or asks
   # the network) and are queued for the export's detached worker (_osrc_hub_scr_flush_wanted), which
   # refreshes the verdict for the next export. A synchronous probe here cost 3-6 s per cloud lane.
-  # So a pr: merged since its last verdict reads done one export later.
+  # So a pr: merged since its last verdict reads done one export later. That deferral is the serve loop's
+  # (OSRC_HUB_FAST=1) only: a one-shot `hub export` is synchronous, so it asks the contract now.
   case " $_OSRC_HUB_MEMO_SAVED " in *" osrc_done_state "*)
     osrc_done_state() {
       local m="$_OSRC_HUB_MEMO/done/${1:-}" v spec="" cwd=""
@@ -89,6 +90,7 @@ _osrc_hub_memo_begin() {
       [ -f "$m" ] && { cat "$m"; return 0; }
       [ -f "$(_osrc_done_dir)/$1.json" ] && { IFS= read -r spec; IFS= read -r cwd; } < <(jq -r '.spec // "", .cwd // ""' "$(_osrc_done_dir)/$1.json" 2>/dev/null)
       case "$spec" in check:*) [ -d "$cwd" ] || spec="" ;; esac   # error cwd-missing, not the old verdict
+      [ "${OSRC_HUB_FAST:-0}" = 1 ] || spec=""   # one-shot: resolve inline
       case "$spec" in
         check:*|pr:*)
           v="$(_osrc_done_cache_peek "$1" 2>/dev/null)"; v="${v:-not-done}"
