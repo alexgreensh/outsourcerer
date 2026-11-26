@@ -11554,7 +11554,7 @@ cmd_explain() {
 }
 
 cmd_status() {
-  _mark_watched "${1:-}"
+  _mark_watched "${1:-}"; [ -n "${1:-}" ] || _cloudrun_orphans 2>/dev/null   # lib/cloudrun.sh: failed cloud launches that may still bill
   local id="${1:-}"
   # A bare status used to call _status_line for every historical job.  Each line
   # reconciles state and may inspect logs/PIDs, so a large jobs directory turns a
