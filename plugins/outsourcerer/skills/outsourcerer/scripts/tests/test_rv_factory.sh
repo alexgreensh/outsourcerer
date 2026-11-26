@@ -79,5 +79,19 @@ if on F53; then
   [ ! -s "$TMP/landed" ] && ok "F53: nor does a later --auto-land run (land_error stands until the captain lands it)" || bad "F53: --auto-land replay landed $(cat "$TMP/landed")"
 fi
 
+if on F54; then
+  # A gate the repo profile names but that is not there holds launches (a typo must not remove the gate).
+  printf '[factory]\ngate = "scripts/gate-typo.sh"\n' > "$REPO/.outsourcerer.toml"
+  r="$(OSRC_FACTORY_ROOT="$REPO" gate "$REPO")"
+  case "$r" in "rc=1 "*"not a file"*) ok "F54: a named gate that is not a file holds launches" ;; *) bad "F54: missing gate: $r" ;; esac
+  # A relative gate with no git root to resolve against holds too, never the current folder's script.
+  mkdir -p "$TMP/nogit"; printf 'echo ran > "%s/f54.ran"; exit 0\n' "$TMP" > "$TMP/nogit/gate.sh"
+  printf '[factory]\ngate = "gate.sh"\n' > "$TMP/p54.toml"
+  r="$(OSRC_FACTORY_ROOT="$TMP/nogit" OSRC_FACTORY_PROFILE="$TMP/p54.toml" gate "$TMP/nogit")"
+  case "$r" in "rc=1 "*) [ ! -e "$TMP/f54.ran" ] && ok "F54: a relative gate with no repo root holds and runs nothing" || bad "F54: ran the cwd's gate.sh ($r)" ;;
+    *) bad "F54: relative gate, no root: $r (ran: $([ -e "$TMP/f54.ran" ] && echo yes || echo no))" ;; esac
+  rm -f "$REPO/.outsourcerer.toml"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
