@@ -353,7 +353,7 @@ _osrc_hub_build_project() {
   type _osrc_hub_sessions_total >/dev/null 2>&1 && stot="$(_osrc_hub_sessions_total "$slug")"
   case "$stot" in ''|*[!0-9]*) stot=0 ;; esac
   # Card fields are read inside this one jq (they were eight jq calls): `s` is what `jq -r '.x // ""'`
-  # printed, so values keep their old text form; an order that is not a number still fails the build.
+  # printed, so values keep their old text form; an order that is not a number reads 99.
   out="$(jq -cn \
     --arg id "$slug" --arg name "$name" --arg upd "$upd" \
     --arg upda "$upda" --argjson live "$llive" --argjson staleHours "$stale_hours" \
@@ -362,7 +362,7 @@ _osrc_hub_build_project() {
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
     --argjson card "$card" --argjson derived "$derived" '
     def s: (. // "") | if type == "string" then sub("\n+$"; "") else tojson end;
-    ($card.order // 99 | if type == "string" then fromjson else . end) as $order
+    ($card.order // 99 | if type == "number" then . elif type == "string" then (tonumber? // 99) else 99 end) as $order
     | ($card.status | s) as $status | ($card.pct | s) as $pct | ($card.eta | s) as $eta | ($card.etaNote | s) as $etanote
     | ($card.tagline | s) as $tagline | ($card.repo | s) as $repo
     | ($card.reportedAt | s | if . == "" and $pmt > 0 then ($pmt | todate) else . end) as $rep_at
@@ -807,8 +807,9 @@ _osrc_hub_export_run() {
     [ -n "$slug" ] || continue
     [ -n "$proj" ] && [ "$slug" != "$proj" ] && continue
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.start"
-    local pj; pj="$(_osrc_hub_build_project "$slug" "$now" "$upd")" || continue
-    [ -n "$pj" ] || continue
+    _osrc_hub_slug_ok "$slug" || continue
+    local pj; pj="$(_osrc_hub_build_project "$slug" "$now" "$upd")"   # a failed build is listed, never dropped (lib/hub-safe.sh)
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$pj" || pj="$(_osrc_hub_stub_project "$slug" "$now" "$upd" "this project could not be read in this export; its lanes are not shown")"
     # Full listing: working orchestrator sessions only. --project still answers for any slug.
     [ -n "$proj" ] || _osrc_hub_visible "$slug" "$pj" || continue
     if [ -z "$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)" ]; then
@@ -824,7 +825,7 @@ _osrc_hub_export_run() {
   # One card per project, then live evidence vs reports (lib/hub-truth.sh).
   [ -n "$proj" ] || ! type _osrc_hub_group >/dev/null 2>&1 || projects="$(_osrc_hub_group "$projects")"
   if type _osrc_hub_truth >/dev/null 2>&1; then
-    projects="$(jq -c '.[]' <<<"$projects" | while IFS= read -r pj; do _osrc_hub_truth "$pj" "$now"; printf '\n'; done | jq -cs 'map(del(._hasStatus))')"
+    projects="$(jq -c '.[]' <<<"$projects" | while IFS= read -r pj; do _osrc_hub_truth_safe "$pj" "$now"; done | jq -cs 'map(del(._hasStatus))')"
   fi
   if [ -z "$proj" ]; then
     local uj; uj="$(_osrc_hub_unowned_project "$now" "$upd")"
@@ -987,4 +988,5 @@ cmd_hub() {
 # helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
 type _osrc_hub_truth >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-truth.sh" ] && . "$_osrc_hub_d/hub-truth.sh"; unset _osrc_hub_d; }
 type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }
+type _osrc_hub_stub_project >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-safe.sh" ] && . "$_osrc_hub_d/hub-safe.sh"; unset _osrc_hub_d; }
 type _osrc_hub_job_state >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanemeta.sh" ] && . "$_osrc_hub_d/hub-lanemeta.sh"; unset _osrc_hub_d; }

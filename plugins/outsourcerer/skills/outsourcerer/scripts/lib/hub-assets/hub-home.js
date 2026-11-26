@@ -340,6 +340,7 @@
         u.dataset.words = '1'; u.dataset.rk = 'project:' + p.id; u.dataset.base = (p.status === 'paused' ? 'Paused since ' : 'Updated ') + (sEp ? localStamp(sEp) : shortStamp(p.updatedAt, p.updated));
         u.append(ic(p.status === 'paused' ? 'pause' : 'clock'), el('span', 'lstx', u.dataset.base)); meta.append(u);
       }
+      if (p.exportError) { const x = el('span', 'lst'); x.append(ic('triangle-alert'), document.createTextNode(String(p.exportError))); meta.append(x); }   // a project the export could not read
       // Home tiles never show lane counts ("N lanes: x building, y done").
       if (meta.children.length) pr.append(meta); else if (!hasPct(p)) pr.remove();
       // A project tile shows the project and its decisions only. No lane or session lists,

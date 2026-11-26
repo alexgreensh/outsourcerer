@@ -207,5 +207,20 @@ if on F45; then
   [ "$b" = '[]' ] && ok "F45: output that is not a JSON array still empties the rail" || no "F45: bad output gave $b"
 fi
 
+if on F46; then
+  # One bad project never drops out silently or takes the others with it.
+  for p in s46a s46b s46c; do mkdir -p "$OSRC_HOME/owners/$p" "$OSRC_HOME/hub/seen/$p"; touch "$OSRC_HOME/hub/seen/$p/.beat"; mkjob "j-$p" running; : > "$OSRC_HOME/owners/$p/j-$p"; done
+  echo '{"name":"Order typo","order":"first"}' > "$OSRC_HOME/hub/projects/s46a.json"
+  echo '{"name":"Good B"}' > "$OSRC_HOME/hub/projects/s46b.json"; echo '{"name":"Good C"}' > "$OSRC_HOME/hub/projects/s46c.json"
+  a="$(lib cmd_hub_export 2>/dev/null | jq -c '[.projects[] | select(.id | startswith("s46")) | .id] | sort')"
+  [ "$a" = '["s46a","s46b","s46c"]' ] && ok "F46: a card with a non-numeric order still exports its project" || no "F46: projects $a"
+  b="$(lib eval '_osrc_hub_build_project() { [ "$1" = s46b ] && return 1; printf "{\"id\":\"%s\",\"name\":\"%s\",\"lanes\":[],\"decisions\":[],\"liveLanes\":1}\n" "$1" "$1"; }; cmd_hub_export' 2>/dev/null \
+    | jq -c '[.projects[] | select(.id | startswith("s46")) | {id, e: ((.exportError // "") != "")}] | sort_by(.id)')"
+  [ "$b" = '[{"id":"s46a","e":false},{"id":"s46b","e":true},{"id":"s46c","e":false}]' ] && ok "F46: a project whose build fails is a stub with exportError" || no "F46: build failure gave $b"
+  c="$(lib eval 'eval "$(declare -f _osrc_hub_truth | sed "1s/^_osrc_hub_truth /_rv_truth /")"; _osrc_hub_truth() { case "$1" in *\"s46c\"*) echo "not json" ;; *) _rv_truth "$@" ;; esac; }; cmd_hub_export' 2>/dev/null \
+    | jq -c '[.projects[] | select(.id | startswith("s46")) | {id, e: ((.exportError // "") != "")}] | sort_by(.id)')"
+  [ "$c" = '[{"id":"s46a","e":false},{"id":"s46b","e":false},{"id":"s46c","e":true}]' ] && ok "F46: one bad truth pass keeps every project (that one marked)" || no "F46: truth failure gave $c"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
