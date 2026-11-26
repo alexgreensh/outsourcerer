@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_devin_probe_strict.sh — the Devin health probe asks no consent, so it may only ping a model
 # with STRICT proof of Free (the spend gate's own _osrc_devin_free_for_spend, or the exact literal
-# glm-5-2). The free LABEL never fires on a glob or bare alias, and both Free-set builders share one
+# glm-5-2, offline only). The free LABEL never fires on a glob or bare alias, and both Free-set builders share one
 # freshness rule and one catalog parse per catalog mtime (torture-room security F1, pattern F1/F5,
 # performance F2/F3). Hermetic: own OSRC_HOME, no devin on PATH unless a stub is installed.
 set -uo pipefail
@@ -54,16 +54,25 @@ done
 eq "offline probe keeps proven swe-2-high" "$(run "$T/off" 300 '_devin_probe_pick swe-2-high')" swe-2-high
 eq "glm excluded -> offline-proven swe-2-high" "$(EXCL=glm run "$T/off" 300 '_devin_probe_pick swe-2-flash-max-lightning')" swe-2-high
 
-# 2. fresh catalog: only exact cost_tier=Free ids are probeable
+# 2. fresh catalog: only exact cost_tier=Free ids are probeable. The plan literals glm-5-2 / swe-1-7
+# are offline-only: a reachable catalog that does not mark them Free (a re-pricing) wins (rv F7).
 for m in $PAID; do
-  eq "fresh catalog probe skips $m" "$(run "$T/home" 999999 "_devin_probe_pick $m")" glm-5-2
+  eq "fresh catalog probe skips $m (glm-5-2 not catalog Free: nothing probed)" "$(run "$T/home" 999999 "_devin_probe_pick $m")" ""
 done
 eq "fresh catalog: Free x-high probeable" "$(run "$T/home" 999999 '_devin_probe_pick x-high')" x-high
+eq "fresh catalog: swe-1-7 literal not catalog Free is skipped" "$(run "$T/home" 999999 '_devin_probe_pick swe-1-7 x-high')" x-high
+cp -R "$T/home" "$T/glmfree"; rm -f "$T/glmfree/.devin-free-ids"
+echo '{"families":[{"family_uid":"glm","variants":[{"model_uid":"glm-5-2","cost_tier":"Free"}]}]}' > "$T/glmfree/catalogs/dv.raw.json"
+echo '["glm-5-2"]' > "$T/glmfree/catalogs/dv.json"
+eq "fresh catalog marking glm-5-2 Free: probe keeps it" "$(run "$T/glmfree" 999999 '_devin_probe_pick kimi-k3')" glm-5-2
 
 # 3. env override end to end: _devin_free_probe with a stub devin never sends a paid --model
 : > "$T/devin.models"
 OSRC_DEVIN_PROBE_MODEL=swe-2-flash-high-lightning run "$T/home" 999999 '_devin_free_probe >/dev/null'
-eq "doctor probe with paid OSRC_DEVIN_PROBE_MODEL pings glm-5-2" "$(cat "$T/devin.models")" glm-5-2
+eq "doctor probe with paid OSRC_DEVIN_PROBE_MODEL pings nothing unproven" "$(cat "$T/devin.models")" ""
+: > "$T/devin.models"
+OSRC_DEVIN_PROBE_MODEL=swe-2-flash-high-lightning run "$T/off" 300 '_devin_free_probe >/dev/null'
+eq "offline doctor probe with paid OSRC_DEVIN_PROBE_MODEL pings glm-5-2" "$(cat "$T/devin.models")" glm-5-2
 
 # 4. stale catalog: neither builder proves Free from it (one freshness rule)
 cp -R "$T/home" "$T/stale"; touch -t 202001010000 "$T/stale/catalogs/dv.json" "$T/stale/catalogs/dv.raw.json"

@@ -924,7 +924,7 @@ _devin_free_own_quota() { # <model> <text>
 # bash-native, captures output safely, and returns 124 when the bound fires.
 _devin_free_probe() {
   local model
-  model="$(_devin_probe_pick "${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}")" || { echo "every Devin probe model is on your exclude list; probe skipped" >&2; return 3; }
+  model="$(_devin_probe_pick "${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}")" || { echo "no Devin probe model is proven free (excluded, or the live catalog does not mark it Free); probe skipped" >&2; return 3; }
   _timeout "${OSRC_DEVIN_PROBE_SECS:-30}" \
     devin --model "$model" --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
 }
@@ -968,7 +968,7 @@ _lane_free_probe() {
     : > "$out" 2>/dev/null && chmod 600 "$out" 2>/dev/null || out=""
   fi
   model="$(_devin_probe_pick "${2:-${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}}")" || {
-    [ -n "$out" ] && printf 'every Devin probe model is on your exclude list\n' > "$out"
+    [ -n "$out" ] && printf 'no Devin probe model is proven free (excluded, or not catalog Free)\n' > "$out"
     printf 'unreachable'; return 0; }
   if ! have devin; then
     [ -n "$out" ] && printf 'devin CLI not on PATH\n' > "$out"
