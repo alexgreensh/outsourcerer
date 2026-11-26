@@ -697,6 +697,7 @@ _osrc_spend_gate() {
   # Devin bills per model: a caller that cannot name the model it launches (a picker choice)
   # gets no Free default. Launch paths with no -m pass the default id itself (lib/spend-paths.sh).
   case "$lane" in dv|devin) [ -n "$model" ] || bill=unknown ;; esac
+  _OSRC_GATE_BILL="$lane|$bill"   # the verdict the banner and receipt repeat (_osrc_gate_paid)
   # unknown is treated as METERED everywhere — cloud sessions included. A hosted
   # session's plan login is proven by the same billing probes as a local launch
   # (claude auth status / codex login status / devin catalog), and hosted-session
@@ -735,6 +736,14 @@ _osrc_spend_gate() {
   local est="" mcost
   mcost="$(_lane_marginal_cost "$lane" "$mname" 1000 2>/dev/null)"
   case "$mcost" in ''|*[!0-9.]*) ;; *) est="$mcost" ;; esac
+  # A refused Devin id that case-folds to a proven-Free id is a typo, not a spend question: point
+  # at the free id instead of offering --spend-ok (live-test F16). The launcher is case-exact.
+  local lower; lower="$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
+  case "$lane" in dv|devin) if [ "$lower" != "$model" ] && _osrc_devin_free_for_spend "$lower"; then
+    local nx="${OSRC_SPEND_NEXT:-$0 run -m $lower}"; nx="${nx// --spend-ok/}"; nx="${nx//"$model"/$lower}"
+    _osrc_event failed "$lane" "case-mismatch:$lane/$model — did you mean $lower (free)?" "$nx" spend >&2
+    die "spend gate: Devin has no free id \"$model\" (ids are case-sensitive). Did you mean $lower (free)? Re-run with -m $lower; no spend consent is needed."
+  fi ;; esac
   local detail="paid-lane:$lane/$mname ($bill) — $why"
   local nexthint="${OSRC_SPEND_NEXT:-$0 --spend-ok}"
   if [ -t 0 ] && { [ -t 2 ] || { [ "${_OSRC_PREFLIGHT_FD:-0}" = 1 ] && [ -t 5 ]; }; }; then
@@ -755,6 +764,18 @@ _osrc_spend_gate() {
   fi
   _osrc_event approval "${lane:-launch}" "$detail" "$nexthint" spend >&2
   die "spend gate: $lname ($disp / $mname) bills $bill and this run is non-interactive — refusing rather than spending silently. Re-run with --spend-ok to approve THIS command only (never persisted), or pick a subscription/free lane."
+}
+
+# _osrc_gate_paid <lane> -> rc0 when this process's spend gate judged <lane> metered/unknown, i.e.
+# the launch runs on spend consent. The free-tier banner and the receipt must not then say "$0 cash"
+# (live-test F8: the consent prompt said metered, the receipt said free). One verdict, the gate's.
+_osrc_gate_paid() {
+  case "${_OSRC_GATE_BILL:-}" in "${1:-}|"*) ;; *) return 1 ;; esac
+  case "${_OSRC_GATE_BILL##*|}" in subscription|free) return 1 ;; esac
+}
+_osrc_receipt_disclosure() {  # <lane> -> the receipt's cost clause
+  if _osrc_gate_paid "${1:-}"; then printf 'billed as paid (%s; approved with --spend-ok)' "${_OSRC_GATE_BILL##*|}"
+  else _lane_cost_disclosure "${1:-}"; fi
 }
 
 # _osrc_or_set <model> -> the OpenRouter models this launch may run, model first: the delegate's own

@@ -2566,7 +2566,7 @@ Finish your edits, then run the task's own unit tests and requested --check with
   # Bug-1 clarification: glm/swe (and the other plan-included ids) are FREE-tier on Devin. Devin's own
   # output shows a paid ACU balance that can read "0% remaining" — that figure is a SEPARATE paid pool
   # and does not gate a free-tier model. Say so up front so a "0%" line is never misread as a block.
-  local _dv_free=0; _devin_is_free_model "$MODEL" && _dv_free=1
+  local _dv_free=0; _devin_is_free_model "$MODEL" && ! _osrc_gate_paid dv && _dv_free=1
   [ "$_dv_free" = "1" ] && printf '>>> [free-tier] "%s" runs on Devin'\''s plan-included tier — a paid ACU / "0%% remaining" figure in Devin'\''s output is a separate balance and does NOT gate it.\n' "$MODEL" >&2
   # Proactive plan meter at the dispatch site: past the soft threshold, say (once per dispatch) that the
   # shared daily bucket is being drained hard. Routing advice only — a user-driven job is never blocked
@@ -2598,7 +2598,7 @@ Finish your edits, then run the task's own unit tests and requested --check with
     _posture_set devin autonomous restricted
     _devin_autonomous_restricted_notice
   fi
-  printf '>>> [receipt] %s.\n' "$(_lane_cost_disclosure dv)" >&2
+  printf '>>> [receipt] %s.\n' "$(_osrc_receipt_disclosure dv)" >&2
   # The "retry with yolo" hint is wrong for the org-policy case (yolo is LESS safe and is not the
   # fix); the clean notice above already gave the right next step. Only hint for OTHER sandbox failures.
   if [ -n "$sandbox" ] && [ "$rc" -ne 0 ] && [ "$_policy_blocked" -eq 0 ]; then
@@ -2934,7 +2934,7 @@ _or_chain() {
 
 # resolve_model_row <user-model> -> echoes "id|lane|tier" from the table, or "" if unknown.
 resolve_model_row() {
-  printf '%s\n' "$OSRC_MODEL_TABLE" | awk -F'|' -v m="$1" '$1==m {print $2"|"$3"|"$4; exit}'
+  printf '%s\n' "$OSRC_MODEL_TABLE" | awk -F'|' -v m="$1" '$1==m {print $2"|"$3"|"$4; x=1; exit} c=="" && tolower($1)==tolower(m) {c=$2"|"$3"|"$4} END {if (!x && c!="") print c}'   # exact first, then case-folded (routing only)
 }
 
 tier_from_price() {   # <openrouter-id> -> budget|mid|frontier from cached pricing, or nonzero
