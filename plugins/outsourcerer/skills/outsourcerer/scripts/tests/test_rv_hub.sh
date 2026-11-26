@@ -243,5 +243,12 @@ if on F48; then
   done
 fi
 
+if on F49; then
+  D="$HERE/../../references/hub.md"
+  grep -Fq '<project-slug>--<decision-id>' "$D" && no "F49: references/hub.md still keys answers by the project slug" || ok "F49: no answer key by project slug"
+  grep -Fq 'answers/<owner-session>--<id>.json' "$D" && grep -Fq '`<owner-session>--<decision-id>`' "$D" && ok "F49: references/hub.md documents the owner-session answer key" || no "F49: owner key not documented"
+  grep -Fq "project: obj.project" "$LIB/hub.html" && grep -Fq "(d.owner || p.id) + '--' + d.id" "$LIB/hub-assets/hub-decide.js" && ok "F49: the page still writes that key" || no "F49: page key changed; update the doc"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
