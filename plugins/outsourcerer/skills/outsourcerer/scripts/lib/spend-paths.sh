@@ -95,14 +95,22 @@ _osrc_take_spend_ok() {
   return 0
 }
 # _osrc_loop_needs_approval <shape> <lid> <ldir> <attempt> <next> -> rc0 when the attempt never ran
-# because a spend/cap gate refused it (its EVENT approval line, or the fail-closed lib refusal).
+# because a spend/cap gate refused it: the attempt exited nonzero (attempt-N.rc) AND its output ENDS
+# with the gate's own EVENT approval / NEXT / "ERROR: spend gate" lines, or the fail-closed lib
+# refusal. A delegate that prints such lines while it works is followed by the run's own output or
+# exits 0, so a completed attempt is never read as unlaunched and re-run (rv F8).
 # The loop then stops as needs-approval with one EVENT + NEXT: no check graded, no attempt counted
 # (resume re-runs it), no escalation, no receipt for a run that did not launch (live-test F5).
 _osrc_loop_needs_approval() {
-  local out="$3/attempt-$4.out" ev
-  ev="$(grep -a '^EVENT approval ' "$out" 2>/dev/null | tail -1)"
-  [ -n "$ev" ] || grep -aq 'spend/cap gate library .* missing or damaged' "$out" 2>/dev/null || return 1
-  [ -n "$ev" ] || ev="EVENT approval loop 0 spend gate library damaged"
+  local out="$3/attempt-$4.out" ev t
+  [ -s "$3/attempt-$4.rc" ] || return 1
+  t="$(grep -av '^[[:space:]]*$' "$out" 2>/dev/null | tail -3)"
+  case "$t" in
+    *"spend/cap gate library "*" missing or damaged"*) case "$(tail -1 <<<"$t")" in *"missing or damaged"*) ;; *) return 1 ;; esac
+      ev="EVENT approval loop 0 spend gate library damaged" ;;
+    "EVENT approval "*$'\n'"NEXT "*$'\n'"ERROR: spend gate"*) ev="$(head -1 <<<"$t")" ;;
+    *) return 1 ;;
+  esac
   echo "[loop $1] $2: attempt $4 was not launched: a spend/cap gate needs your approval (nothing spent, no attempt counted). Approve with --spend-ok on the loop; each attempt's consent binds to that attempt's own lane/model." >&2
   printf 'needs approval: %s\n' "${ev#EVENT approval * * }" > "$3/last_fail" 2>/dev/null || true
   printf '%s\n' "$(( $4 - 1 ))" > "$3/attempt" 2>/dev/null || true

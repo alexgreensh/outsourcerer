@@ -18225,7 +18225,7 @@ $feedback"
     # Every attempt would then see the same pre-edit failure, the stall guard would fire, and the loop
     # would report `blocked` while the real work landed in the background, unwatched. The loop is its
     # own supervisor and is the thing meant to be long-running, so it always waits in the foreground. Loop consent rides argv.
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
     _osrc_loop_needs_approval verify "$lid" "$ldir" "$attempt" "$0 --spend-ok loop resume $lid" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     # Defense in depth: if a delegate ever detaches anyway, the check below would silently grade stale
     # files. Refuse to grade rather than emit a confident wrong verdict.
@@ -18473,7 +18473,7 @@ $feedback"
     # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so the check would grade
     # unwritten files — and a false failure would also spend the next rung's money. The loop always waits.
     local _a0 _ael; _a0=$(date +%s)
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
     _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     _ael=$(( $(date +%s) - _a0 ))
     local _skip_check=0 _result=fail cout="" crc=0
