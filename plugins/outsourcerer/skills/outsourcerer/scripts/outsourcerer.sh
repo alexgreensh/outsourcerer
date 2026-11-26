@@ -18020,7 +18020,7 @@ _loop_check() {
 }
 
 cmd_loop() {
-  local shape="${1:-}"; [ $# -gt 0 ] && shift; _osrc_take_spend_ok "$@"; set -- "${_OSRC_ARGS[@]+"${_OSRC_ARGS[@]}"}"
+  local shape="${1:-}"; [ $# -gt 0 ] && shift; _osrc_take_spend_ok "$@" 2>/dev/null && set -- "${_OSRC_ARGS[@]+"${_OSRC_ARGS[@]}"}"
   local resume=0 lid="" ldir=""
   case "$shape" in
     status)

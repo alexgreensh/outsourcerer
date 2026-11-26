@@ -86,6 +86,7 @@ _osrc_take_spend_ok() {
     if [ "$dd" = 0 ] && [ "$a" = --spend-ok ]; then OSRC_SPEND_OK=1; continue; fi
     [ "$a" = -- ] && dd=1; _OSRC_ARGS+=("$a")
   done
+  return 0
 }
 # _osrc_loop_needs_approval <shape> <lid> <ldir> <attempt> <next> -> rc0 when the attempt never ran
 # because a spend/cap gate refused it (its EVENT approval line, or the fail-closed lib refusal).
