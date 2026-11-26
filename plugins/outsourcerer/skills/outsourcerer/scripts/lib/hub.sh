@@ -368,7 +368,7 @@ _osrc_hub_build_project() {
     | ($card.reportedAt | s | if . == "" and $pmt > 0 then ($pmt | todate) else . end) as $rep_at
     | {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
      liveLanes:$live, staleHours:$staleHours, cardStaleMin:$cardStaleMin, decisionStaleH:$decisionStaleH, sessionsTotal:$stot,
-     sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
+     sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle|closed)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
     + (if $upda=="" then {} else {updatedAt:$upda} end)
     + (if $rep_at=="" then {} else {reportedAt:$rep_at} end)
     + (if $folder=="" then {} else {folder:$folder} end)
