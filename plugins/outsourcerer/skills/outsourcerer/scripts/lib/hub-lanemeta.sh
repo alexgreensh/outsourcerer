@@ -84,7 +84,7 @@ _osrc_hub_job_state() {
 _osrc_hub_ad_failed() {
   local rc="" f="$OSRC_HOME/autodetach/$1.rc"
   [ -s "$f" ] || return 1
-  IFS= read -r rc < "$f" 2>/dev/null; rc="${rc//[!0-9]/}"
+  IFS= read -r rc 2>/dev/null < "$f"; rc="${rc//[!0-9]/}"
   [ -n "$rc" ] && [ "$rc" != 0 ]
 }
 # _osrc_hub_paused <id> <state> -> 0 when the disk policy paused this still-running lane (lib/disk_policy.sh).
