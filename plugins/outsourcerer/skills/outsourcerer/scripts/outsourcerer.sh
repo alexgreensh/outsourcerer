@@ -177,7 +177,7 @@ set -uo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 # Version identifier. Single source of truth; bump the rightmost
 # number for patch releases. `doctor` and `--version` both read this.
-OSRC_VERSION="0.17.6"
+OSRC_VERSION="0.18.0"
 # Script-level fallback only: lanes with a descriptor default_model use theirs, and dv
 # picks its implicit model at RUN TIME from the live catalog's Free set (_devin_default_
 # free_model in lib/spend.sh) — this constant never reaches a dv dispatch.
