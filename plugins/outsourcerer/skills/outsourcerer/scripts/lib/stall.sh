@@ -196,17 +196,21 @@ osrc_not_landed_emit() { # <pane> <who>
 }
 
 # ---- watcher liveness -------------------------------------------------------------------------------
-# supervise stamps supervise/<key>/alive every poll. A session that owns live lanes with no supervise
-# armed for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
+# ONE answer to "is this session watched", for the stop guard, Mission Control and the per-command
+# warning: a live, polling supervise covering everything (`*`), or the standing watcher (lib/watchsvc.sh)
+# while it ticks and can wake the session. A supervise naming explicit ids covers only those ids.
+osrc_session_watched() { # <sid>
+  _sv_armed_cover "$1" 2>/dev/null | grep -qxF '*' && return 0
+  type _ws_covers >/dev/null 2>&1 && _ws_covers "$1"
+}
+# supervise stamps supervise/<key>/alive every poll. A session that owns live lanes nobody watches
+# (osrc_session_watched) for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
 osrc_watcher_alive() { printf '%s\n' "${2:-$(_sv_now)}" > "$1/alive" 2>/dev/null; return 0; }
 osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 when watched or nothing live
-  local sid="$1" now="${2:-$(_sv_now)}" d f pid last=0 start=0 m live=0 t
+  local sid="$1" now="${2:-$(_sv_now)}" d f last=0 start=0 m live=0 t cover
   case "$sid" in ''|.*|*/*) return 1 ;; esac
   d="$OSRC_HOME/owners/$sid"; [ -d "$d" ] || return 1
-  for f in "$OSRC_HOME/supervise/$sid"/armed.*; do
-    [ -f "$f" ] || continue; pid="${f##*.}"
-    kill -0 "$pid" 2>/dev/null && return 1
-  done
+  osrc_session_watched "$sid" && return 1
   last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$sid/alive" 2>/dev/null)" 0)"
   for f in "$d"/*; do
     [ -f "$f" ] || continue
@@ -217,9 +221,11 @@ osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 
   [ "$start" -gt 0 ] || return 1
   [ "$last" -gt "$start" ] && start="$last"
   [ $(( now - start )) -gt "$(_sv_num "${OSRC_WATCHER_GRACE:-}" 120)" ] || return 1
+  cover="$(_sv_armed_cover "$sid" 2>/dev/null)"
   for f in "$d"/*; do
     [ -f "$f" ] || continue; t="${f##*/}"
     case "$t" in .*|watch.*) continue ;; esac
+    printf '%s\n' "$cover" | grep -qxF "$t" && continue   # an explicit supervise covers this one
     case "$(_owned_live_state "$t" 2>/dev/null)" in live|waiting) live=$((live + 1)) ;; esac
   done
   [ "$live" -gt 0 ] || return 1

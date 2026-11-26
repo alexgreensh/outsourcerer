@@ -142,15 +142,11 @@ cmd_stop_guard() {
     return 0
   fi
   need="${need# }${idle}"
+  if osrc_session_watched "$sid"; then   # the one "is this session watched" rule (lib/stall.sh)
+    rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
+    return 0
+  fi
   waited="$(_waited_ids "$sid" 2>/dev/null)"
-  if printf '%s\n' "$waited" | grep -qxF '*'; then
-    rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
-    return 0
-  fi
-  if type _ws_covers >/dev/null 2>&1 && _ws_covers "$sid"; then
-    rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
-    return 0
-  fi
   for id in $need; do printf '%s\n' "$waited" | grep -qxF "$id" || unwaited="$unwaited $id"; done
   unwaited="${unwaited# }"
   [ -n "$unwaited" ] || return 0
