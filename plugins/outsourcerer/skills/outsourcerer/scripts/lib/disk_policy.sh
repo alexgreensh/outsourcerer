@@ -746,7 +746,7 @@ _osrc_disk_monitor_loop() {
   trap '_osrc_disk_monitor_exit' EXIT
   trap 'exit 0' TERM
   poll="${OSRC_DISK_POLICY_POLL:-30}"; case "$poll" in ''|*[!0-9]*|0) poll=30 ;; esac; [ "$poll" -le 30 ] || poll=30   # env may only poll faster
-  maxidle="${OSRC_DISK_MONITOR_IDLE_TICKS:-40}"; case "$maxidle" in ''|*[!0-9]*|0) maxidle=40 ;; esac
+  maxidle="${OSRC_DISK_MONITOR_IDLE_TICKS:-2}"; case "$maxidle" in ''|*[!0-9]*|0) maxidle=2 ;; esac   # no job or lane left: gone within ~2 polls
   last="$(cat "$d/demand" 2>/dev/null)"
   _osrc_disk_log "monitor $_OSRC_DISK_ME started"
   while :; do
@@ -770,6 +770,29 @@ _osrc_disk_monitor_loop() {
   done
 }
 
+# _osrc_disk_monitor_exec — become the monitor as its own process named osrc-disk-monitor (what
+# `ps` shows), started from a snapshot of this shell: every function (wrapper and test overrides
+# included) and the non-exported OSRC_/SCRIPT_ settings (exported ones, secrets among them, travel
+# in the environment, never in the file). The private snapshot is deleted once read. Falls back
+# to running the loop in place when the exec cannot happen.
+_osrc_disk_monitor_exec() {
+  local snap v line fl
+  if [ -n "${BASH:-}" ] && snap="$(mktemp "$(_osrc_disk_dir)/.monitor.XXXXXX" 2>/dev/null)"; then
+    { declare -f
+      for v in $(compgen -v); do
+        case "$v" in OSRC_*|_OSRC_*|SCRIPT_*|SESSION_NAME) ;; *) continue ;; esac
+        case "$v" in *KEY*|*TOKEN*|*SECRET*|*PASS*) continue ;; esac
+        line="$(declare -p "$v" 2>/dev/null)" || continue
+        fl="${line#declare -}"; case "${fl%% *}" in *x*) continue ;; esac   # exported: already in the env
+        printf '%s\n' "$line"
+      done; } > "$snap" 2>/dev/null
+    shopt -s execfail
+    exec -a osrc-disk-monitor "$BASH" -c '. "$1" 2>/dev/null; rm -f "$1"; _osrc_disk_monitor_loop' osrc-disk-monitor "$snap"
+    rm -f "$snap"
+  fi
+  _osrc_disk_monitor_loop
+}
+
 # _osrc_disk_monitor_ensure — called on every launch: post demand, spawn a monitor unless a
 # verified owner is alive. The child closes every inherited descriptor 3-31 (a caller's fd 5, or
 # bash's saved copies of a capture pipe at 10+) so it never holds a caller's pipe open. It is
@@ -784,9 +807,9 @@ _osrc_disk_monitor_ensure() {
   printf '%s.%s.%s\n' "$(date +%s)" "$$" "$RANDOM" > "$d/demand" 2>/dev/null
   _osrc_disk_lock_alive && return 0
   if [ "${OSRC_PLATFORM:-}" = windows ]; then
-    ( i=3; while [ "$i" -lt 32 ]; do eval "exec $i>&-"; i=$((i+1)); done; _osrc_disk_monitor_loop ) </dev/null >/dev/null 2>&1 &
+    ( i=3; while [ "$i" -lt 32 ]; do eval "exec $i>&-"; i=$((i+1)); done; _osrc_disk_monitor_exec ) </dev/null >/dev/null 2>&1 &
   else
-    ( set -m; _OSRC_DISK_FORKER="${BASHPID:-$(sh -c 'echo "$PPID"')}"; ( i=3; while [ "$i" -lt 32 ]; do eval "exec $i>&-"; i=$((i+1)); done; _osrc_disk_monitor_loop ) </dev/null >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
+    ( set -m; _OSRC_DISK_FORKER="${BASHPID:-$(sh -c 'echo "$PPID"')}"; ( i=3; while [ "$i" -lt 32 ]; do eval "exec $i>&-"; i=$((i+1)); done; _osrc_disk_monitor_exec ) </dev/null >/dev/null 2>&1 & ) </dev/null >/dev/null 2>&1
   fi
   return 0
 }
