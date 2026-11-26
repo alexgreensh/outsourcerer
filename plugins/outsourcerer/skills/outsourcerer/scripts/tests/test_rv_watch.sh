@@ -78,6 +78,16 @@ o="$(rv "OSRC_NOW=$((NOW0+60)) osrc_remote_events")"
 [ "$(jq -r .head_ready "$RH/remote/big1.json")" = true ] && grep -q '^EVENT done big1 .*READY' <<<"$o" \
   && ok "head_ready=true and a done READY event" || bad "big READY tip missed: ready=$(jq -r .head_ready "$RH/remote/big1.json") events: $o"
 
+echo "=== F23: a quiet lane with a launch session says what is known, and says it again each stall interval ==="
+rv "OSRC_NOW=$NOW0 cmd_lane add quiet1 --branch cloud/quiet1 --repo '$REMOTE'" >/dev/null
+jq '.session_ref="url:https://example.invalid/session/abc"' "$RH/remote/quiet1.json" > "$TMP/q.json" && mv "$TMP/q.json" "$RH/remote/quiet1.json"
+e1="$(rv "OSRC_NOW=$((NOW0+50)) osrc_remote_events" | grep '^EVENT stalled quiet1')"
+e2="$(rv "OSRC_NOW=$((NOW0+60)) osrc_remote_events" | grep '^EVENT stalled quiet1')"
+e3="$(rv "OSRC_NOW=$((NOW0+145)) osrc_remote_events" | grep '^EVENT stalled quiet1')"
+grep -q 'the launch reported session https://example.invalid/session/abc' <<<"$e1" && ! grep -q 'is live' <<<"$e1" \
+  && ok "the stalled row says the launch reported a session, not that it is live" || bad "first row: $e1"
+[ -z "$e2" ] && [ -n "$e3" ] && ok "no repeat inside the stall interval, a repeat after it" || bad "repeat: e2=[$e2] e3=[$e3]"
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

@@ -493,13 +493,12 @@ osrc_remote_events() {
       esac
     fi
     # A lane that has not pushed: "never started" (failed) only when the launch reported no session.
-    # Cloud lanes often push only when done, so a lane whose vehicle reported a live session is quiet,
-    # not failed: one `stalled` row naming the session, never an invitation to kill working lanes.
-    if [ "$st" = live ] && [ -z "$head" ] && [ "$errn" = 0 ] && [ "$_RR_seen" != true ] && _osrc_lane_never_started "$_RR_created" "$now" \
-       && _osrc_ev_due "$id" neverstarted 0; then
+    # Cloud lanes often push only when done, so a lane whose launch reported a session is `stalled`,
+    # not failed, and says so again every stall interval: nothing here checks that the session lives.
+    if [ "$st" = live ] && [ -z "$head" ] && [ "$errn" = 0 ] && [ "$_RR_seen" != true ] && _osrc_lane_never_started "$_RR_created" "$now"; then
       if [ -n "$_RR_ref" ]; then
-        _osrc_emit stalled "$id" "no push yet after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m (session ${_RR_ref#url:} is live; cloud lanes often push only when done)" "$(_osrc_self) lane show $id"
-      else
+        _osrc_ev_due "$id" neverstarted "${stall:-0}" && _osrc_emit stalled "$id" "no push yet after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m (the launch reported session ${_RR_ref#url:}; cloud lanes often push only when done)" "$(_osrc_self) lane show $id"
+      elif _osrc_ev_due "$id" neverstarted 0; then
         _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
       fi
     fi
