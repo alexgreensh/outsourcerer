@@ -285,9 +285,9 @@ grep -q '^EVENT failed rv2 .*gone' <<<"$ev" && ok "reviewer session gone with wo
 # ---- 14. gh transport (fake gh): auth, rate limit, success ----------------------------------------------
 cmd_lane add ghlane --branch cloud/gh1 --repo octo/widgets >/dev/null 2>&1
 printf 'gh: To use GitHub CLI in a script, authenticate with gh auth login (HTTP 401)\n' > "$GH_ERR"; tick 1; ev="$(events)"
-grep -q '^EVENT failed ghlane .*auth failure' <<<"$ev" && grep -q '^NEXT gh auth status' <<<"$ev" && ok "gh auth failure: EVENT failed with the reason, not silence" || bad "no auth failure event: $ev"
+grep -q '^EVENT poll-failed ghlane .*(auth, ' <<<"$ev" && grep -q '^NEXT gh auth status' <<<"$ev" && ok "gh auth failure: EVENT poll-failed with the reason, not silence" || bad "no auth failure event: $ev"
 printf 'gh: API rate limit exceeded for user (HTTP 403)\n' > "$GH_ERR"; tick 2000; ev="$(events)"
-grep -q '^EVENT failed ghlane .*rate limited' <<<"$ev" && ok "gh rate limit: EVENT failed naming the rate limit" || bad "no rate-limit event: $ev"
+grep -q '^EVENT poll-failed ghlane .*(rate, .*rate limit' <<<"$ev" && ok "gh rate limit: EVENT poll-failed naming the rate limit" || bad "no rate-limit event: $ev"
 rm -f "$GH_ERR"
 jq -n '{sha:"aaaaaaa1111111111111111111111111111111aa", commit:{message:"READY: gh lane done"}, files:[{filename:"x.txt"}]}' > "$GH_OUT"
 tick 2000; ev="$(events)"

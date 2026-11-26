@@ -175,9 +175,10 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   fi
   case "$st" in gone) return 1 ;; esac
   # One jq for the five fields (was five). \037 separates; tabs/newlines become spaces as the note does.
-  local url veh model
-  IFS=$'\037' read -r branch head msg repo url veh model < <(jq -r 'def c: (if type == "string" then . else tojson end) | sub("\n+$"; "") | gsub("[\t\n\u001f]"; " ");
-    [(.branch // "" | c), (.head // "" | c), (.head_msg // "" | c), (.repo // "" | c), (.url // "" | c), (.vehicle // "" | c), (.model // "" | c)] | join("\u001f")' "$f" 2>/dev/null)
+  local url veh model perr
+  IFS=$'\037' read -r branch head msg repo url veh model perr < <(jq -r 'def c: (if type == "string" then . else tojson end) | sub("\n+$"; "") | gsub("[\t\n\u001f]"; " ");
+    [(.branch // "" | c), (.head // "" | c), (.head_msg // "" | c), (.repo // "" | c), (.url // "" | c), (.vehicle // "" | c), (.model // "" | c),
+     (if (.err_count // 0) > 0 then "\(.err_kind // "net"): \(.err_msg // "")" else "" end | c)] | join("\u001f")' "$f" 2>/dev/null)
   _OSRC_LL=""; type _osrc_hub_lane_label >/dev/null 2>&1 && _osrc_hub_lane_label remote "$veh"
   head7="${head:0:7}"; msg="$(_osrc_hub_note "$msg")"
   repo="$(_osrc_hub_repo_name "$repo" "$url")"
@@ -190,6 +191,8 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   [ "$st" = "ready" ] && [ -n "$rv" ] && raw="verdict-$rv"
   [ "$st" = "done" ] && [ -z "$rv" ] && rv="MERGE"
   mapped="$(_osrc_hub_lane_status "$raw" "$rv" "${msg:+$msg}${head7:+ @${head7}}")"
+  # the last poll failed: what the card shows is stale, say so instead of Building
+  [ "$st" != live ] || [ -z "$perr" ] || mapped="Can't check||can't check the branch: $perr"
   mstat="${mapped%%|*}"; mapped="${mapped#*|}"; mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
   jq -cn --arg id "$id" --arg short "$id" --arg status "$mstat" --arg pct "$mpct" \
@@ -784,6 +787,7 @@ _osrc_hub_export_run() {
   # doc as current; OSRC_HUB_FAST=1 opts in, OSRC_HUB_REFRESH=1 still forces a rebuild.
   : "${OSRC_HUB_FAST:=0}"; export OSRC_HUB_FAST
   _osrc_hub_need jq date stat sort tr sed cut basename awk grep cat head
+  type _osrc_cwd_safe >/dev/null 2>&1 && _osrc_cwd_safe   # git calls below need a cwd that exists
   local proj="" a
   while [ "$#" -gt 0 ]; do case "$1" in --project) proj="${2:-}"; shift 2 ;; *) shift ;; esac; done
   [ -z "$proj" ] || _osrc_hub_slug_ok "$proj" || die "hub export: bad project slug '$proj'"
