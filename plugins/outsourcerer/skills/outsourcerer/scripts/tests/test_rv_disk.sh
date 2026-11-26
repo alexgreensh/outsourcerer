@@ -123,5 +123,28 @@ o="$(osrc "_waited_ids() { printf 'job-w\\n'; seq 1 300000; }; ls() { return 1; 
 o="$(osrc "git() { if [ \"\$3\" = worktree ]; then printf 'branch refs/heads/br-x\\n'; seq 1 300000; else command git \"\$@\"; fi; }; _osrc_branch_checked_out /nowhere br-x; echo rc=\$?" | tail -1)"
 [ "$o" = rc=0 ] && ok "a branch early in a long worktree list is checked out" || bad "checked-out branch missed: $o"
 
+echo "=== F16: a resume whose pause time cannot be banked does not leave the job reading as paused ==="
+lstart() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g'; }
+stopped() { case "$(ps -o stat= -p "$1" 2>/dev/null)" in *T*) return 0 ;; esac; return 1; }
+fakejob() { # <id> -> running job whose delegate is a real sleep; prints its pid
+  local jd="$OSRC_JOBS_T/$1" p
+  mkdir -p "$jd"; sleep 300 </dev/null >/dev/null 2>&1 & p=$!; KILL="$KILL $p"
+  echo running > "$jd/status"; echo "$p" > "$jd/pid"; lstart "$p" > "$jd/pid_start"; printf '%s' "$p"
+}
+J=job-f16; P="$(fakejob "$J")"; JD="$OSRC_JOBS_T/$J"
+osrc "_osrc_disk_pause_job \"$JD\"" >/dev/null
+stopped "$P" && ok "setup: the delegate is SIGSTOPped" || bad "setup: delegate not stopped"
+sed "s/^since|.*/since|$(( $(date +%s) - 100 ))/" "$JD/disk-paused" > "$JD/rec.tmp" && mv "$JD/rec.tmp" "$JD/disk-paused"
+mkdir "$JD/disk-paused-secs"   # the bank write fails, as on a full disk
+osrc "_osrc_disk_resume_rec \"$JD/disk-paused\"" >/dev/null
+o="$(osrc "_osrc_disk_target_paused $J && echo paused; _osrc_disk_paused_secs \"$JD\"")"
+! stopped "$P" && [ ! -f "$JD/disk-paused" ] && ! grep -q paused <<<"$o" && [ "${o:-0}" -ge 100 ] \
+  && ok "resumed, not reported paused, the 100s span still counted ($o)" || bad "bank-lost resume: rec=$([ -f "$JD/disk-paused" ] && echo kept) out=$o"
+rmdir "$JD/disk-paused-secs"
+osrc "_osrc_disk_pause_job \"$JD\"; _osrc_disk_resume_rec \"$JD/disk-paused\"" >/dev/null
+o="$(osrc "_osrc_disk_paused_secs \"$JD\"")"
+[ "$(cat "$JD/disk-paused-secs" 2>/dev/null)" -ge 100 ] && [ "$o" -ge 100 ] && [ "$o" -lt 200 ] \
+  && [ -z "$(ls "$JD" | grep unbanked)" ] && ok "the next bank folds the span in once ($o)" || bad "next bank: secs=$(cat "$JD/disk-paused-secs" 2>/dev/null) total=$o files=$(ls "$JD")"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

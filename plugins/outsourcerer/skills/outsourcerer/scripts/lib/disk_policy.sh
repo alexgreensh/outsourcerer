@@ -441,7 +441,8 @@ _osrc_disk_resume_rec() {
   [ -f "$rec" ] || return 0
   case "$rec" in */disk-paused)
     jd="${rec%/disk-paused}"; t="$rec.${_OSRC_DISK_ME:-$$}"   # a failed rewrite keeps the old record
-    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null || banked=0
+    printf '%s\n' "$(_osrc_disk_paused_secs "$jd")" > "$jd/disk-paused-secs" 2>/dev/null \
+      && rm -f "$jd"/disk-paused.unbanked.* 2>/dev/null || banked=0   # now inside the bank
     [ "$banked" = 1 ] \
       && grep -v '^since|' "$rec" > "$t" 2>/dev/null && mv -f "$t" "$rec" 2>/dev/null || rm -f "$t" 2>/dev/null ;;
   esac
@@ -461,8 +462,12 @@ _osrc_disk_resume_rec() {
   fi
   while IFS='|' read -r a b c; do [ -n "$a" ] && _osrc_disk_pane_restore "$a" "$b" "$c" "$live"; done <<<"$panes"
   [ -n "$jd" ] && _osrc_disk_keepalive "$jd" resumed
-  # Bank lost (full disk): keep the record so its since line still shifts the job's clocks.
-  [ "$banked" = 1 ] && rm -f "$rec" 2>/dev/null
+  # Bank lost (full disk): a rename needs no new data blocks. disk-paused.unbanked
+  # (named .<pid>.<epoch>) keeps the pause span for the job's clocks without reading as paused; the record stays only
+  # if even the rename fails.
+  [ "$banked" = 1 ] && { rm -f "$rec" 2>/dev/null; return 0; }
+  [ -n "$jd" ] && mv -f "$rec" "$jd/disk-paused.unbanked.${_OSRC_DISK_ME:-$$}.$(date +%s)" 2>/dev/null
+  return 0
 }
 
 _osrc_disk_resume_all() {
@@ -474,10 +479,14 @@ _osrc_disk_resume_all() {
 # _osrc_disk_paused_secs <jd> -> total seconds the job has spent disk-paused, including an
 # ongoing pause. The watchdog subtracts this from its wall-clock deadlines.
 _osrc_disk_paused_secs() {
-  local t s
+  local t s f e
   t="$(cat "$1/disk-paused-secs" 2>/dev/null)"; case "$t" in ''|*[!0-9]*) t=0 ;; esac
   s="$(sed -n 's/^since|//p' "$1/disk-paused" 2>/dev/null)"
   case "$s" in ''|*[!0-9]*) : ;; *) t=$(( t + $(date +%s) - s )) ;; esac
+  for f in "$1"/disk-paused.unbanked.*; do   # pauses whose bank write failed (full disk)
+    [ -f "$f" ] || continue; e="${f##*.}"; s="$(sed -n 's/^since|//p' "$f" 2>/dev/null)"
+    case "$e:$s" in *[!0-9:]*|:*|*:) continue ;; esac; [ "$e" -ge "$s" ] && t=$(( t + e - s ))
+  done
   printf '%s' "$t"
 }
 
