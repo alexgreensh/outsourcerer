@@ -39,8 +39,29 @@ the real `outsourcerer.sh cleanup` CLI.
   with the note; the `hub export` row was `"status":"Blocked","state":"limit","attention":"limit"` with
   the note; `supervise --once <id>` printed `EVENT disk-paused <id> … NEXT … disk status`; and after
   `cancel <id>` the supervisor exited and the record was gone.
-- Related suites: see "Suite runs" below.
-- Conformance: see below.
+- Related suites, each run alone with `nice bash tests/<suite>.sh`, all rc 0: `test_disk_policy` (94),
+  `test_disk_gate_failsafe` (52), `test_cleanup_manifest` (85, run twice), `test_supervise`,
+  `test_stall`, `test_watcher`, `test_supervise_dedupe`, `test_hub`, `test_hub_truth`, `test_hub_attn`,
+  `test_no_pipe_grep_q`.
+- `test_disk_gate_failsafe`: round 1's CC F7 check asserted that a paused job raises *no* event. It
+  now asserts the `disk-paused` event, the new rule (open question 1).
+
+## Conformance
+
+`cd plugins/outsourcerer/skills/outsourcerer/scripts && nice bash tests/conformance.sh`, run once,
+on `a1c5e0e`, the commit before the last fix: **rc=1**, `RESULT: 260 passed, 6 failed, 14 skipped`.
+
+- `test_harness_isolation`, `test_vocab_hygiene`, `test_parity_insource_refresh`: these fail because
+  the container runs as root, and they fail the same way on the base. Round 1's report describes them.
+- `test_no_pipe_grep_q`: a real failure, in my new test (`jq … | grep -q` at test_disk_r2.sh:56).
+  Fixed in the last commit. The lint now passes alone (rc 0), as does `test_disk_r2` (22 passed).
+- `test_cleanup_manifest`: failed once inside conformance ("gate still refused after ack"). It passed
+  alone twice, before and after the run (85/85). I could not reproduce it. My guess is that, under
+  conformance's parallel load, an lsof or mtime-based verdict flipped between the ack and the gate,
+  which changes the ASK hash. That is unproven.
+- `test_disk_policy`: timed out after 600 s inside conformance. It passed alone (94/94, about 2 min).
+
+I did not rerun the full conformance after the lint fix. The brief allows one run.
 
 ## What remains unproven
 
