@@ -133,9 +133,11 @@ cmd_plan_start() {
   echo "Order (up to $max at once; ready tasks start together):"
   _osrc_fs_order "$rows"
   [ "$dry" = 0 ] || { echo "(dry run: nothing was created)"; return 0; }
+  # An existing plan is reused when it holds some of these tasks, or none at all (a first `task add`
+  # that failed right after the plan was created: the message says to rerun the same list).
   if [ -f "$(_plan_dir "$plan")/plan.json" ]; then
     _task_list "$plan" | _osrc_fp_jq -e --argjson ks "$(printf '%s\n' "$rows" | cut -d "$(printf '\036')" -f1 | jq -R . | jq -cs .)" \
-      'any(.[]; .title as $t | $ks | index($t))' >/dev/null 2>&1 \
+      'length == 0 or any(.[]; .title as $t | $ks | index($t))' >/dev/null 2>&1 \
       || die "plan start: plan '$plan' already exists and none of its tasks are in $file. Pick a new plan name (or add tasks with task add)."
     [ -z "$goal" ] || echo "plan '$plan' exists, so --goal is ignored (the plan keeps its goal)."
     reuse=1; echo "plan '$plan' exists; tasks already in it are kept, the rest are added."

@@ -113,5 +113,14 @@ if on F55; then
   rm -rf "$REPO/.outsourcerer.toml" "$REPO/scripts"
 fi
 
+if on F56; then
+  # The first task add fails after the plan was created; the advice "rerun the same list" must work.
+  printf 'a | do a\nb | do b | after=a\n' > "$TMP/l56"
+  o1="$( cd "$REPO" && cmd_plan_run() { :; } && _task_cli_add() { echo "task add: disk full" >&2; return 1; } && cmd_plan_start p56 "$TMP/l56" 2>&1 )"
+  o2="$(start p56 "$TMP/l56")"; rc=$?
+  case "$o1" in *"Rerun the same list"*) ;; *) bad "F56: first run said: $o1" ;; esac
+  [ "$rc" = 0 ] && [ "$(_task_list p56 | jq length)" = 2 ] && ok "F56: rerunning the same list finishes a plan whose first add failed" || bad "F56: rerun rc=$rc: $o2"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
