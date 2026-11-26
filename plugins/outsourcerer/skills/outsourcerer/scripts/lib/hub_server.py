@@ -57,6 +57,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]
 # Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
 # Always fullmatch: re.match with "$" also accepts a trailing newline.
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
+HELLO_RE = re.compile(r"[0-9a-f]{32}")   # /hello nonce: 16 random bytes, hex
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
 
@@ -757,6 +758,14 @@ def make_handler(hub):
             path = u.path
             if path == "/reopen":
                 return self._send_json(self.REOPEN_DENIED, 403)   # POST with the old key only
+            if path == "/hello":
+                # Identity without the token: HMAC(token, "osrc-hub-hello:" + nonce). `mc` checks it before
+                # it reuses a hub, so a process that took a probed port never receives the token.
+                n = urllib.parse.parse_qs(u.query).get("n", [""])[0]
+                if not HELLO_RE.fullmatch(n):
+                    return self._send_json({"error": "bad nonce"}, 400)
+                return self._send_json({"proof": hmac.new(hub.token.encode("utf-8"), ("osrc-hub-hello:" + n).encode(),
+                                                          hashlib.sha256).hexdigest()})
             if path.startswith("/assets/"):
                 # A font fetch means a page is open — count it as a poll so the
                 # idle timer reflects real use.

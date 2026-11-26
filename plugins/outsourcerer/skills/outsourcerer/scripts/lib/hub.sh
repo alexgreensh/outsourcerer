@@ -926,7 +926,7 @@ cmd_hub_serve() {
 }
 
 # cmd_hub_mc: `mc` / `mission-control`, the open-the-page command. It reuses a hub that already serves this
-# OSRC_HOME (its token answers /api/answers on 8788-8798), else starts one detached, opens the page and
+# OSRC_HOME (it proves it holds the token: _osrc_hub_mc_find), else starts one detached, opens the page and
 # returns. Before 0.16.4 `mc` ran `hub serve` in the foreground: it never returned, and with 8788 taken it
 # quietly started a second server. `mc serve ...` (or any serve flag) still runs the server in front.
 cmd_hub_mc() {
@@ -936,22 +936,8 @@ cmd_hub_mc() {
   local dir="${_OSRC_FACTORY_DIR:-$SCRIPT_DIR}"
   [ -f "$tokf" ] && [ ! -L "$tokf" ] && tok="$(tr -d ' \n' <"$tokf" 2>/dev/null)"
   case "$tok" in *[!0-9a-fA-F]*) tok="" ;; esac
-  if [ "${#tok}" -eq 32 ] && command -v curl >/dev/null 2>&1; then
-    # The port this OSRC_HOME's hub last recorded, then an explicit OSRC_HUB_PORT, then the fixed
-    # 8788-8798 scan: a `hub serve --port N` / OSRC_HUB_PORT hub lives outside the scan but is still
-    # ours. The token gates every probe, so a stale record or a foreign server just misses.
-    local plist="" sp p2
-    sp="$(jq -r '.port // empty' "$OSRC_HOME/hub/serve.json" 2>/dev/null)"
-    case "$sp" in ''|*[!0-9]*) ;; *) plist="$sp" ;; esac
-    case "${OSRC_HUB_PORT:-}" in ''|*[!0-9]*) ;; *) plist="${plist:+$plist }${OSRC_HUB_PORT}" ;; esac
-    for p2 in 8788 8789 8790 8791 8792 8793 8794 8795 8796 8797 8798; do
-      case " $plist " in *" $p2 "*) ;; *) plist="$plist $p2" ;; esac
-    done
-    for p in $plist; do
-      [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $tok" "http://127.0.0.1:$p/api/answers" 2>/dev/null)" = 200 ] \
-        && { url="http://127.0.0.1:$p/?t=$tok"; break; }
-    done
-  fi
+  # Our hub proves itself without the token (lib/hub-safe.sh): a stranger on a probed port never gets it.
+  if [ "${#tok}" -eq 32 ] && p="$(_osrc_hub_mc_find "$tok")"; then url="http://127.0.0.1:$p/?t=$tok"; fi
   # A live hub is reused only when it runs THIS engine: an older install's server (or another
   # checkout's) answers the token probe and keeps serving old code and old bugs (0.17.5).
   # _osrc_mc_stale_hub kills only a process verified as this OSRC_HOME's hub server.

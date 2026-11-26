@@ -250,5 +250,33 @@ if on F49; then
   grep -Fq "project: obj.project" "$LIB/hub.html" && grep -Fq "(d.owner || p.id) + '--' + d.id" "$LIB/hub-assets/hub-decide.js" && ok "F49: the page still writes that key" || no "F49: page key changed; update the doc"
 fi
 
+if on F50; then
+  # A stranger on a probed port answers 200 to anything and logs what it gets: it must never see the token.
+  cat > "$TMP/f50-listen.py" <<'PY'
+import http.server, sys, json
+log = open(sys.argv[1], "a")
+class H(http.server.BaseHTTPRequestHandler):
+    def _any(self):
+        log.write(self.path + "\n" + "".join("%s: %s\n" % kv for kv in self.headers.items()) + "--\n"); log.flush()
+        b = json.dumps({"proof": "0" * 64}).encode(); self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    do_GET = do_POST = _any
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(("127.0.0.1", 0), H); print(s.server_address[1], flush=True); s.serve_forever()
+PY
+  : > "$TMP/f50.log"; python3 -I "$TMP/f50-listen.py" "$TMP/f50.log" > "$TMP/f50.port" & PIDS="$PIDS $!"
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$TMP/f50.port" ] && break; sleep 0.2; done
+  FP="$(head -1 "$TMP/f50.port")"; FTOK=0123456789abcdef0123456789abcdef
+  mkdir -p "$TMP/f50home/hub"; chmod 700 "$TMP/f50home/hub"; echo "$FTOK" > "$TMP/f50home/hub/token"
+  r="$(OSRC_HOME="$TMP/f50home" OSRC_HUB_PORT="$FP" lib eval 'nohup() { :; }; sleep() { :; }; _osrc_mc_hub_reuse() { return 0; }; cmd_hub_mc' 2>&1)"
+  grep -q "$FTOK" "$TMP/f50.log" && no "F50: mc sent the hub token to a stranger's port: $(grep -m1 "$FTOK" "$TMP/f50.log")" || ok "F50: a stranger on a probed port never receives the token"
+  case "$r" in *"127.0.0.1:$FP/"*) no "F50: mc reused the stranger as Mission Control: $r" ;; *) ok "F50: the stranger is not taken for Mission Control" ;; esac
+  # Our own hub (same token, recorded port) is still found and reused.
+  if srv_start 'echo "{\"generated_at\":1,\"projects\":[]}"'; then
+    echo "$SRV_TOK" > "$SRV_HOME/hub/token"; chmod 600 "$SRV_HOME/hub/token"
+    r="$(OSRC_HOME="$SRV_HOME" OSRC_HUB_PORT="$SRV_PORT" lib eval 'nohup() { :; }; _osrc_mc_hub_reuse() { return 0; }; cmd_hub_mc' 2>&1)"
+    case "$r" in *"Mission Control: http://127.0.0.1:$SRV_PORT/?t=$SRV_TOK"*) ok "F50: mc still finds and reuses its own hub" ;; *) no "F50: own hub not found: $r" ;; esac
+  else no "F50: the hub did not start: $(cat "$SRV_HOME/err")"; fi
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
