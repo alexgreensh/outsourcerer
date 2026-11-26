@@ -17,17 +17,20 @@ _osrc_sigint_restore "\$@" || { echo "still-ignored args=\$*"; exit 0; }
 trap 'echo trapped' INT; echo "trap=[\$(trap -p INT)] args=\$*"
 PROBE
 B="${BASH:-bash}"
-# A simple command run with & in a non-interactive shell starts with SIGINT ignored.
-pre="$("$B" -c '"$1" -c "trap \"echo t\" INT; trap -p INT" & wait' _ "$B")"
-[ "$pre" = "trap -- '' SIGINT" ] && ok "fixture: a background job starts with SIGINT ignored" || bad "fixture did not ignore SIGINT: $pre"
+# Start children with SIGINT ignored, the state `nohup ... &` leaves them in. Built with perl, not
+# `cmd & wait`: bash 5 ignores SIGINT for async jobs of a non-interactive shell, bash 3.2 does not.
+PERL="$(command -v perl)" || { echo "SKIP: perl needed to build the SIGINT-ignored fixture"; exit 0; }
+ign() { "$PERL" -e '$SIG{INT} = "IGNORE"; exec { $ARGV[0] } @ARGV or die "exec: $!\n"' "$@"; }
+pre="$(ign "$B" -c 'trap "echo t" INT; trap -p INT')"
+[ "$pre" != "trap -- 'echo t' SIGINT" ] && ok "fixture: the child starts with SIGINT ignored (no INT trap can install)" || bad "fixture did not ignore SIGINT: $pre"
 
-out="$("$B" -c '"$1" "$2" a "b c" & wait' _ "$B" "$TMP/probe.sh")"
+out="$(ign "$B" "$TMP/probe.sh" a "b c")"
 [ "$out" = "trap=[trap -- 'echo trapped' SIGINT] args=a b c" ] \
   && ok "ignored SIGINT at start: re-exec restores it and keeps the argv" || bad "restore failed: $out"
 
 # No python3 and no perl on PATH: the helper says it could not restore (the gate then SKIPs).
 mkdir -p "$TMP/bin"; for c in bash dirname mktemp rm cat; do p="$(command -v "$c")" && ln -s "$p" "$TMP/bin/$c"; done
-out="$(PATH="$TMP/bin" "$B" -c '"$1" "$2" x & wait' _ "$B" "$TMP/probe.sh")"
+out="$(PATH="$TMP/bin" ign "$B" "$TMP/probe.sh" x)"
 [ "$out" = "still-ignored args=x" ] && ok "no shim available: the helper reports SIGINT still ignored" || bad "no-shim path: $out"
 
 out="$("$B" "$TMP/probe.sh" fg)"

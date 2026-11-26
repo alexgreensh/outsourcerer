@@ -4,7 +4,9 @@
 # entry, so every suite that asserts an INT trap would FAIL for a reason that is not its own.
 # _osrc_sigint_restore re-execs the caller once with SIGINT at default through a python3 or perl
 # shim (both only call sigaction + exec); with neither, the caller SKIPs those suites and says why.
-_osrc_sigint_ignored() { [ "$(trap ':' INT; trap -p INT)" = "trap -- '' SIGINT" ]; }
+# Ignored at entry = a trap cannot be installed. bash 5 then prints `trap -- '' SIGINT`, bash 3.2 prints
+# nothing, so test for "the trap did not take", never for either spelling.
+_osrc_sigint_ignored() { [ "$(trap ':' INT; trap -p INT)" != "trap -- ':' SIGINT" ]; }
 
 # _osrc_sigint_restore "$@" -> returns 0 when SIGINT is usable, 1 when it stays ignored; on success
 # with a shim it does not return (the script restarts with the same argv).
