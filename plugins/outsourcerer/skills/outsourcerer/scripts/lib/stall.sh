@@ -200,14 +200,15 @@ osrc_not_landed_emit() { # <pane> <who>
 # warning: a live, polling supervise covering everything (`*`), or the standing watcher (lib/watchsvc.sh)
 # while it ticks and can wake the session. A supervise naming explicit ids covers only those ids.
 osrc_session_watched() { # <sid>
-  _sv_armed_cover "$1" 2>/dev/null | grep -qxF '*' && return 0
+  local c n=$'\n'; c="$(_sv_armed_cover "$1" 2>/dev/null)"   # captured, not piped: a quiet grep must not SIGPIPE it
+  case "$n$c$n" in *"$n*$n"*) return 0 ;; esac
   type _ws_covers >/dev/null 2>&1 && _ws_covers "$1"
 }
 # supervise stamps supervise/<key>/alive every poll. A session that owns live lanes nobody watches
 # (osrc_session_watched) for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
 osrc_watcher_alive() { printf '%s\n' "${2:-$(_sv_now)}" > "$1/alive" 2>/dev/null; return 0; }
 osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 when watched or nothing live
-  local sid="$1" now="${2:-$(_sv_now)}" d f last=0 start=0 m live=0 t cover
+  local sid="$1" now="${2:-$(_sv_now)}" d f last=0 start=0 m live=0 t cover nl=$'\n'
   case "$sid" in ''|.*|*/*) return 1 ;; esac
   d="$OSRC_HOME/owners/$sid"; [ -d "$d" ] || return 1
   osrc_session_watched "$sid" && return 1
@@ -232,7 +233,7 @@ osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 
   for f in "$d"/*; do
     [ -f "$f" ] || continue; t="${f##*/}"
     case "$t" in .*|watch.*) continue ;; esac
-    printf '%s\n' "$cover" | grep -qxF "$t" && continue   # an explicit supervise covers this one
+    case "$nl$cover$nl" in *"$nl$t$nl"*) continue ;; esac   # an explicit supervise covers this one
     case "$(_owned_live_state "$t" 2>/dev/null)" in live|waiting) live=$((live + 1)) ;; esac
   done
   [ "$live" -gt 0 ] || return 1
