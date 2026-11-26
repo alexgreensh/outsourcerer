@@ -35,3 +35,14 @@ Paths below are relative to `plugins/outsourcerer/skills/outsourcerer/scripts/`.
 - Tests: `tests/test_bg_provider_after_verb.sh` e2e now checks stderr for droid and warp. Before:
   `27 passed, 2 failed` (`launched (default lane: droid; a model alias can route it elsewhere …`).
   After: `29 passed, 0 failed`. `tests/test_lane_liveness.sh` static check follows the new wording: `14 passed, 0 failed`.
+
+## Item 5: the heartbeat beacon ends with its jobs
+- `outsourcerer.sh` `_heartbeat_beacon`: it checked for work only before a whole `sleep $cadence`
+  (300 s), so it outlived the last job by up to the full cadence. It now waits the cadence in slices of
+  `OSRC_HEARTBEAT_IDLE_CHECK` seconds (default 30, capped at the cadence) and stops waiting once no work
+  is left; the next pass ticks once more, so the finish is still reported, and then the beacon exits.
+  The slice is 30 s, not 1 s, because `_heartbeat_active_work` reconciles every job dir. Net
+  `outsourcerer.sh` is still smaller than the base (18832 -> 18830 lines after items 4 and 5).
+- Test: `tests/test_heartbeat_immortal_beacon.sh` case 5 (300 s cadence, last job ends at 1 s: beacon
+  must exit within 8 s after a final tick). Before: `passed=4 failed=1`. After: `passed=5 failed=0`.
+  Also green: `test_heartbeat_single_instance` (7/0), `test_heartbeat_autoarm` (6/0), `test_heartbeat_ownership` (12/0).

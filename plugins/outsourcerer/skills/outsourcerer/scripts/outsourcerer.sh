@@ -8389,8 +8389,9 @@ _heartbeat_leader_evict_stale() {
 
 _heartbeat_beacon() {
   local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-300}"
-  local pid_start rc
+  local pid_start rc waited slice="${OSRC_HEARTBEAT_IDLE_CHECK:-30}"
   case "$cadence" in ''|*[!0-9]*|0) cadence=300 ;; esac
+  case "$slice" in ''|*[!0-9]*|0) slice=30 ;; esac; [ "$slice" -le "$cadence" ] || slice="$cadence"
   [ -n "$token" ] || token="$(_heartbeat_token)"
   pid_start="$(_pid_start_identity "$$")" || {
     echo "outsourcerer: heartbeat ownership unknown; stable process identity unavailable" >&2
@@ -8414,10 +8415,10 @@ _heartbeat_beacon() {
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
     _heartbeat_tick || true
     [ "${OSRC_HEARTBEAT_ONCE:-0}" = "1" ] && break
-    # A beacon exists only to watch supervised work.  Do not leave a sleeping
-    # 300-second process after the final job finishes.
+    # A beacon exists only to watch supervised work. Wait out the cadence in slices and stop waiting
+    # once no work is left: the next pass ticks once more (reporting the finish) and then ends.
     _heartbeat_active_work || break
-    sleep "$cadence"
+    waited=0; while [ "$waited" -lt "$cadence" ]; do sleep "$slice"; waited=$((waited + slice)); _heartbeat_active_work || break; done
   done
 }
 
