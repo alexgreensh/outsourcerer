@@ -67,5 +67,22 @@ o="$(run cleanup job-cln 2>&1)"; rc=$?
   && grep -q 'removed-worktree.*job-cln' "$OSRC_HOME/cleanup.log" 2>/dev/null \
   && ok "a clean pushed worktree is removed, and the removal is logged" || bad "clean removal broken (rc=$rc): $o"
 
+echo "=== F11: secret shapes are case-folded and widened; skip-worktree/assume-unchanged edits count ==="
+wtr() { osrc "_osrc_wt_remove \"$R\" \"$1\" test ${2:-}; echo rc=\$?" | tail -1; }
+for nm in .ENV .envrc prod.env .pypirc cert.PFX keystore.jks id_dsa; do
+  mkwt "$R" "wt-s$$"; W="$R/.outsourcerer/worktrees/wt-s$$"
+  mkdir -p "$W/node_modules/pkg"; printf 'x\n' > "$W/node_modules/pkg/$nm"
+  [ "$(wtr "$W" caches)" = rc=2 ] && [ -f "$W/node_modules/pkg/$nm" ] && ok "cache file $nm keeps the worktree" || bad "cache file $nm deleted"
+  git -C "$R" worktree remove --force "$W" >/dev/null 2>&1; git -C "$R" branch -q -D "outsourcerer/wt-s$$"
+done
+mkwt "$R" wt-sk; W="$R/.outsourcerer/worktrees/wt-sk"
+git -C "$W" update-index --skip-worktree app.txt; printf 'edited\n' > "$W/app.txt"
+[ "$(wtr "$W")" = rc=2 ] && [ "$(cat "$W/app.txt")" = edited ] && ok "a skip-worktree edit keeps the worktree" || bad "skip-worktree edit deleted"
+git -C "$W" update-index --no-skip-worktree app.txt; git -C "$W" checkout -q -- app.txt
+git -C "$W" update-index --assume-unchanged app.txt; printf 'edited\n' > "$W/app.txt"
+[ "$(wtr "$W")" = rc=2 ] && [ -f "$W/app.txt" ] && ok "an assume-unchanged edit keeps the worktree" || bad "assume-unchanged edit deleted"
+printf 'v1\n' > "$W/app.txt"
+[ "$(wtr "$W")" = rc=0 ] && [ ! -d "$W" ] && ok "an unchanged assume-unchanged file does not block removal" || bad "unchanged hidden file blocked removal"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

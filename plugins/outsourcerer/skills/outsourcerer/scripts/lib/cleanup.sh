@@ -48,7 +48,8 @@ _osrc_cl_log() { printf '%s/cleanup.log' "$OSRC_HOME"; }
 # The one way cleanup and reclaim delete a worktree. `git worktree remove` (never --force) still
 # deletes IGNORED files, so the untracked and ignored list is re-read here, just before it. Any
 # entry keeps the worktree. With "caches" (typed `cleanup --apply`), files inside a top-level
-# node_modules/.venv/__pycache__ are allowed unless secret-shaped (.env*, keys). The removal is
+# node_modules/.venv/__pycache__ are allowed unless secret-shaped (.env*, keys), case-folded.
+# A tracked file hidden by skip-worktree or assume-unchanged keeps it too. The removal is
 # logged before it runs (no log line, no removal) and its outcome after.
 _osrc_wt_remove() {
   local st f b log; log="$(_osrc_cl_log)"
@@ -57,8 +58,18 @@ _osrc_wt_remove() {
     [ -n "$f" ] || continue
     [ "${4:-}" = caches ] || return 2
     case "$f" in '!! node_modules/'?*|'!! .venv/'?*|'!! __pycache__/'?*) ;; *) return 2 ;; esac
-    b="${f##*/}"
-    case "$b" in .env|.env.*|.npmrc|.netrc|credentials|id_rsa|id_ed25519|id_ecdsa|*.pem|*.key|*.p12) return 2 ;; esac
+    b="$(printf '%s' "${f##*/}" | tr '[:upper:]' '[:lower:]')"   # .ENV is .env on a case-insensitive disk
+    case "$b" in .env|.env.*|*.env|.envrc|.npmrc|.netrc|.pypirc|credentials|id_rsa|id_dsa|id_ed25519|id_ecdsa|*.pem|*.key|*.p12|*.pfx|*.jks) return 2 ;; esac
+  done <<<"$st"
+  # Tracked files marked skip-worktree (S) or assume-unchanged (lowercase tag) hide their edits
+  # from status. One on disk whose content differs from the index keeps the worktree (a sparse
+  # checkout's absent S files do not); a name git had to quote cannot be checked, so it keeps it.
+  st="$(git -C "$2" -c core.quotePath=false ls-files -v 2>/dev/null)" || return 2
+  st="$(sed -n 's/^[Shmrcks] //p' <<<"$st")"
+  while IFS= read -r f; do
+    case "$f" in '') continue ;; '"'*) return 2 ;; esac
+    [ -e "$2/$f" ] || [ -L "$2/$f" ] || continue
+    [ "$(git -C "$2" hash-object -- "$f" 2>/dev/null)" = "$(git -C "$2" rev-parse -q --verify ":$f" 2>/dev/null)" ] || return 2
   done <<<"$st"
   printf '%s\tremoving-worktree\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$2" 2>/dev/null >> "$log" || return 1
   if git -C "$1" worktree remove "$2" >/dev/null 2>&1; then
