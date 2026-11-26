@@ -275,10 +275,11 @@ _sv_observe() { # <id> <now> [src] [owner]
   SV_K=""; SV_D=""; SV_H=0; SV_OUT=0; SV_DROP=0; SV_PEND=0; SV_NX=""; SV_WT=""; SV_STOPPED=0; SV_RM=""; SV_HA=""; SV_STALL_START=""
   case "$id" in watch.*) _sv_observe_watch "$id" "$src" "$owner"; return 0 ;; esac
   # Disk-paused (SIGSTOPped by lib/disk_policy.sh): its screen and log are frozen on purpose. Owed a
-  # waiter, no event (the disk policy wakes once), and the stall clock restarts so a resumed lane is
-  # never read as stalled for the time it spent paused.
+  # waiter, one `disk-paused` event per pause (hourly reminder), no nudge, and the stall clock restarts so a
+  # resumed lane is never read as stalled for the time it spent paused.
   if type _osrc_disk_target_paused >/dev/null 2>&1 && _osrc_disk_target_paused "$id"; then
-    _sv_state_read "$id"; SV_OUT=1; SV_PEND=1; SV_D="disk-paused: resumes when disk space returns ($SCRIPT_PATH disk status)"
+    _sv_state_read "$id"; SV_OUT=1; SV_PEND=1; SV_K=disk-paused; SV_H="disk.$(_osrc_disk_pause_since "$id")"; SV_RM=3600
+    SV_D="$(_osrc_disk_paused_note "$id")"; SV_NX="$SCRIPT_PATH disk status"
     SVS_CHANGED="$now"; SVS_CK=-; _sv_state_write "$id"; return 0
   fi
   stall=$(( $(_sv_num "${OSRC_SUPERVISE_STALL:-}" 15) * 60 ))
@@ -519,7 +520,7 @@ _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   { if [ "$3" = - ]; then tail -c +"$(( $2 + 1 ))" "$1"; else tail -c +"$(( $2 + 1 ))" "$1" | head -c "$(( $3 - $2 ))"; fi; } 2>/dev/null \
   | jq -r --argjson set "$4" --arg all "${_sv_all:-0}" --arg owner "$5" --argjson since "$(( $(_sv_now) - 86400 ))" '
     select(type=="object" and .ts >= $since and ($all == "1" or ($owner != "" and .owner == $owner) or (.target as $t | $set | index($t))))
-    | ({approval:1,"approval-not-landed":1,question:2,failed:3,limit:4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
+    | ({approval:1,"approval-not-landed":1,question:2,failed:3,limit:4,"disk-paused":4,done:5,idle:6,stalled:7,unreviewed:8,drift:9,"watcher-lost":10,approved:11}[.kind] // 12) as $p
     | def f: (. // "" | tostring | gsub("[\t\n\r]";" ")) | if . == "" then "-" else . end;
       [($p|tostring), (.ts|tostring), (.kind|f), (.target|f), (.detail|f), (.next|f),
        ((.id // "\(.ts)/\(.kind)/\(.target)/\(.detail)") | f)] | join("\t")' 2>/dev/null   # not @tsv: it doubles every backslash in a %q NEXT

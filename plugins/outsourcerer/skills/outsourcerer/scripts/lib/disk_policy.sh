@@ -31,9 +31,19 @@ _osrc_disk_conf() { sed -n "s/^$1=//p" "$(_osrc_disk_dir)/settings" 2>/dev/null 
 
 _osrc_disk_vol_kb() { df -kP "$OSRC_HOME" 2>/dev/null | awk 'NR==2 {print $2}'; }
 
-# _osrc_disk_gb_kb <n> -> KB for a non-negative integer GB, or "" when not a plain integer.
+# _osrc_disk_gb_kb <n> -> KB for a whole number of GB (at most 7 digits, capped at 1,000,000 GB so
+# the product never wraps), or "" when not one: the caller uses the default, `disk status` names it.
 _osrc_disk_gb_kb() {
-  case "${1:-}" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$(( $1 * 1048576 ))" ;; esac
+  case "${1:-}" in ''|*[!0-9]*|????????*) printf '' ;;
+    *) local g=$(( 10#$1 )); [ "$g" -le 1000000 ] || g=1000000; printf '%s' "$(( g * 1048576 ))" ;; esac
+}
+
+_osrc_disk_rejected() { # -> "NAME=value ..." for each floor setting the floors ignored
+  local n v out=""
+  for n in OSRC_DISK_MIN_GB OSRC_DISK_PAUSE_GB OSRC_DISK_CRITICAL_GB; do
+    v="$(_osrc_disk_conf "$n")"; [ -n "$v" ] && [ -z "$(_osrc_disk_gb_kb "$v")" ] && out="$out $n=$v"
+  done
+  printf '%s' "${out# }"
 }
 
 # _osrc_disk_floors_kb -> "<launch_kb> <pause_kb> <crit_kb>". The critical floor stays when
@@ -104,6 +114,8 @@ _osrc_disk_report_oneline() {
 _osrc_disk_report() {
   local items="${1:-}" top
   printf 'disk %s\n' "$(_osrc_disk_report_oneline)"
+  top="$(_osrc_disk_rejected)"
+  [ -z "$top" ] || printf 'settings rejected (not a whole number of GB, at most 7 digits), default used: %s\n' "$top"
   top="$(_timeout 20 du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{n=$2; sub(/.*\//,"",n); printf "%s=%sK ", n, $1}')"
   printf 'top under OSRC_HOME: %s\n' "${top:-none}"
   have jq 2>/dev/null || return 0
@@ -782,6 +794,16 @@ _osrc_disk_target_paused() {
   case "${1:-}" in ''|*/*) return 1 ;; esac
   [ -f "$OSRC_JOBS/$1/disk-paused" ] && grep -q '^since|' "$OSRC_JOBS/$1/disk-paused" 2>/dev/null && return 0
   [ -f "$(_osrc_disk_dir)/paused/tmux-$1" ]
+}
+
+_osrc_disk_pause_since() { sed -n 's/^since|//p' "$OSRC_JOBS/$1/disk-paused" "$(_osrc_disk_dir)/paused/tmux-$1" 2>/dev/null | head -1; }
+
+# _osrc_disk_paused_note <id> -> the one line status, the hub and supervise show for a disk-paused lane.
+_osrc_disk_paused_note() {
+  local l p c
+  _osrc_disk_target_paused "${1:-}" || return 1
+  read -r l p c <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
+  printf 'Paused: disk below %s (pause floor); SIGSTOPped, resumes when space returns, or now: %s disk resume' "$(_osrc_disk_fmt_kb "$p")" "$0"
 }
 
 # _osrc_disk_session_gate <session args...> — the disk gate for `session`: start and model switch

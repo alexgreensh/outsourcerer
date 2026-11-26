@@ -11166,14 +11166,12 @@ _status_line() {
     flag=" !no-writes(${_nwa}s,alive)"
   fi
   # Durable NOT-ARMED marker (bg launch arm failure), RE-EVALUATED on every render (hardening):
-  # the marker alone would keep the flag visible forever, including after a later arm succeeded
-  # by a path that never touches this job's marker (`heartbeat start`, a session finalize). So the
-  # flag renders only while supervision is genuinely still not armed: a stale marker is suppressed
-  # the moment _heartbeat_leader_alive verifies a live leader. (A failed arm in _bg_launch itself
-  # clears the marker outright on its next rc-0 arm.)
+  # the marker alone would keep the flag visible forever, even after a later arm by a path that never
+  # touches this marker. So it renders only while no live leader is verified.
   if [ "$(cat "$jd/supervision" 2>/dev/null)" = "not-armed" ] && ! _heartbeat_leader_alive; then
     flag="$flag !SUPERVISION:NOT-ARMED"
   fi
+  [ "$st" = running ] && prog="$(_osrc_disk_paused_note "$id" 2>/dev/null)" && st=paused   # SIGSTOPped
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
@@ -11827,9 +11825,9 @@ cmd_cancel() {
   local pid; pid="$(cat "$jd/pid" 2>/dev/null)"
   [ -n "$pid" ] && _kill_job "$jd" "$pid"
   echo canceled > "$jd/status"; printf 'canceled:operator\n' > "$jd/reason" 2>/dev/null || true; echo "canceled $id"
-  # DISCLOSED limitation: Cline runs a hub/spoke topology and can detach spoke processes that live
-  # outside this job's process tree, so _kill_tree may not reach them. A full process-group kill of
-  # Cline's spokes is out of scope; warn so the operator can check for survivors.
+  _osrc_disk_resume_rec "$jd/disk-paused" 2>/dev/null   # disk-paused: SIGCONT so the TERM lands and the supervisor reaps
+  # DISCLOSED limitation: Cline's hub/spoke topology can detach spokes outside this job's tree, which
+  # _kill_tree may not reach; warn so the operator can check for survivors.
   local _clane; _clane="$(jq -r '.lane // .provider // ""' "$jd/meta.json" 2>/dev/null)"
   case "$_clane" in
     cline) echo "  warning: Cline uses detached hub/spoke processes — a spoke may survive this cancel. Check with: pgrep -fl cline" >&2 ;;

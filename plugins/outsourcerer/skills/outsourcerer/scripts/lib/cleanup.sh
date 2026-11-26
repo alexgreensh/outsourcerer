@@ -168,7 +168,7 @@ _osrc_branch_checked_out() {
 # _osrc_cleanup_verdict <manifest-json> -> prints "VERDICT<TAB>reason"
 # VERDICT in SAFE|ASK|GONE.
 _osrc_cleanup_verdict() {
-  local item="$1" path kind sess repo ts rp root pp newest now st why
+  local item="$1" path kind sess repo ts rp root pp newest now st why home
   path="$(jq -r '.path // ""' <<<"$item")"
   kind="$(jq -r '.kind // ""' <<<"$item")"
   sess="$(jq -r '.session // ""' <<<"$item")"
@@ -187,7 +187,10 @@ _osrc_cleanup_verdict() {
   case "$path" in *..*) printf 'ASK\tpath contains ..\n'; return 0 ;; esac
   # Root containment: worktrees/branches are repo-scoped; every other kind lives under
   # $OSRC_HOME (jobs, fanout, loops, autodetach, isolated, tmp), so that is their root.
-  case "$kind" in worktree|branch) root="$repo" ;; *) root="$OSRC_HOME" ;; esac
+  # Every comparison below is between resolved paths: an OSRC_HOME under a symlink (/tmp, /var on
+  # macOS, a linked /home) must match the realpath of the items it holds.
+  home="$(_osrc_realpath "$OSRC_HOME" 2>/dev/null)" || { printf 'ASK\tOSRC_HOME not resolvable\n'; return 0; }
+  case "$kind" in worktree|branch) root="$repo" ;; *) root="$home" ;; esac
   [ -n "$root" ] || { printf 'ASK\tno recorded root\n'; return 0; }
   rp="$(_osrc_realpath "$root" 2>/dev/null)" || { printf 'ASK\trecorded root not resolvable\n'; return 0; }
 
@@ -197,19 +200,19 @@ _osrc_cleanup_verdict() {
     pp="$(_osrc_realpath "$path" 2>/dev/null)" || { printf 'ASK\tpath not resolvable\n'; return 0; }
     case "$pp" in "$rp"/*) : ;; *) printf 'ASK\tpath outside recorded root\n'; return 0 ;; esac
     case "$pp" in
-      "$rp"|"$OSRC_HOME"|"$HOME"|"/") printf 'ASK\trefusing protected root\n'; return 0 ;;
+      "$rp"|"$home"|"$HOME"|"$(_osrc_realpath "$HOME" 2>/dev/null)"|"/") printf 'ASK\trefusing protected root\n'; return 0 ;;
     esac
     case "${pp##*/}" in
       node_modules|.venv|venv|store|state|.env|.git|.outsourcerer) printf 'ASK\tload-bearing path\n'; return 0 ;;
     esac
     case "$kind" in
-      job)        case "$pp" in "$OSRC_HOME"/jobs/"$sess") : ;; *) printf 'ASK\tnot the shape of a job dir\n'; return 0 ;; esac ;;
-      loop)       case "$pp" in "$OSRC_HOME"/loops/"$sess") : ;; *) printf 'ASK\tnot the shape of a loop dir\n'; return 0 ;; esac ;;
-      fanout)     case "$pp" in "$OSRC_HOME"/fanout/"$sess") : ;; *) printf 'ASK\tnot the shape of a fanout dir\n'; return 0 ;; esac ;;
-      isolated)   case "$pp" in "$OSRC_HOME"/isolated/"$sess") : ;; *) printf 'ASK\tnot the shape of an isolated dir\n'; return 0 ;; esac ;;
-      autodetach) case "$pp" in "$OSRC_HOME"/autodetach/"$sess".log|"$OSRC_HOME"/autodetach/"$sess".rc) : ;; *) printf 'ASK\tnot the shape of an autodetach file\n'; return 0 ;; esac ;;
+      job)        case "$pp" in "$home"/jobs/"$sess") : ;; *) printf 'ASK\tnot the shape of a job dir\n'; return 0 ;; esac ;;
+      loop)       case "$pp" in "$home"/loops/"$sess") : ;; *) printf 'ASK\tnot the shape of a loop dir\n'; return 0 ;; esac ;;
+      fanout)     case "$pp" in "$home"/fanout/"$sess") : ;; *) printf 'ASK\tnot the shape of a fanout dir\n'; return 0 ;; esac ;;
+      isolated)   case "$pp" in "$home"/isolated/"$sess") : ;; *) printf 'ASK\tnot the shape of an isolated dir\n'; return 0 ;; esac ;;
+      autodetach) case "$pp" in "$home"/autodetach/"$sess".log|"$home"/autodetach/"$sess".rc) : ;; *) printf 'ASK\tnot the shape of an autodetach file\n'; return 0 ;; esac ;;
       worktree)   case "$pp" in "$rp"/.outsourcerer/worktrees/"$sess") : ;; *) printf 'ASK\tnot the shape of a worktree\n'; return 0 ;; esac ;;
-      tmp)        case "$pp" in "$OSRC_HOME"/tmp/?*) : ;; *) printf 'ASK\tnot the shape of a tmp path\n'; return 0 ;; esac ;;
+      tmp)        case "$pp" in "$home"/tmp/?*) : ;; *) printf 'ASK\tnot the shape of a tmp path\n'; return 0 ;; esac ;;
       *)          printf 'ASK\tunknown kind %s\n' "$kind"; return 0 ;;
     esac
   fi
@@ -362,12 +365,24 @@ _osrc_cleanup_verdict() {
 # with verdict+why). Args: [--no-size] skips du.
 _osrc_cleanup_items() {
   have jq 2>/dev/null || return 1
-  local mf="$OSRC_HOME/created.jsonl" nosize=0 line item verdict why ksize rc=0 grouped out pp du_out
+  local mf="$OSRC_HOME/created.jsonl" nosize=0 line item verdict why ksize rc=0 grouped out pp du_out parsed bad="" n=0
   [ "${1:-}" = "--no-size" ] && nosize=1
   [ -f "$mf" ] || return 0
   # Read in this shell (no pipeline subshell) so a failure on any item reaches the caller:
-  # a partial list must never look like a complete one.
-  grouped="$(jq -R 'fromjson?' "$mf" 2>/dev/null | jq -cs 'group_by(.path + "" + .kind) | map(last) | .[]' 2>/dev/null)" || return 1
+  # a partial list must never look like a complete one. When the fast parse does not yield one
+  # object per non-blank line (a malformed line; some jq builds stop there), parse line by line
+  # without try/catch: the bad lines become one ASK item that names them, never a silent skip.
+  parsed="$(jq -cR 'fromjson? | objects' "$mf" 2>/dev/null)" || parsed=""
+  if [ "$(printf '%s' "$parsed" | grep -c .)" != "$(grep -c '[^[:space:]]' "$mf" 2>/dev/null)" ]; then
+    parsed=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      n=$((n+1)); case "$line" in *[![:space:]]*) : ;; *) continue ;; esac
+      if item="$(jq -ce 'objects' <<<"$line" 2>/dev/null)"; then parsed="$parsed$item"$'\n'; else bad="${bad:+$bad,}$n"; fi
+    done < "$mf"
+  fi
+  grouped="$(printf '%s' "$parsed" | jq -cs 'group_by((.path|tostring) + "" + (.kind|tostring)) | map(last) | .[]' 2>/dev/null)" || return 1
+  [ -z "$bad" ] || jq -cn --arg p "$mf (line $bad)" '{path:$p, kind:"manifest", session:"", repo:"", verdict:"ASK",
+    why:"malformed manifest line: not read, so nothing it records is deleted; fix or remove the line", size_kb:null}' || rc=1
   while IFS= read -r item; do
     [ -n "$item" ] || continue
     verdict="$(_osrc_cleanup_verdict "$item")" || { rc=1; continue; }
@@ -469,7 +484,7 @@ _osrc_cleanup_dryrun() {
     _osrc_cleanup_remote_branches
     return 0
   fi
-  items="$(_osrc_cleanup_items)"
+  local scan=0; items="$(_osrc_cleanup_items)" || scan=1
   _osrc_cleanup_state_write "$items" || true
   n_safe="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="SAFE")]|length' 2>/dev/null)"; n_safe="${n_safe:-0}"
   n_ask="$(printf '%s' "$items" | jq -s '[.[]|select(.verdict=="ASK")]|length' 2>/dev/null)"; n_ask="${n_ask:-0}"
@@ -483,6 +498,9 @@ _osrc_cleanup_dryrun() {
   echo "[outsourcerer] SAFE items delete with: $0 cleanup --apply"
   _osrc_cleanup_remote_branches
   [ "$n_ask" -gt 0 ] && echo "[outsourcerer] ASK items need your call; after reviewing: $0 cleanup --ack"
+  [ "$scan" = 0 ] && return 0
+  echo "[outsourcerer] cleanup: the scan did not finish (manifest $mf or one of its items could not be read), so this list may be incomplete; nothing was deleted." >&2
+  return 1
 }
 
 _osrc_cleanup_apply() {
@@ -714,6 +732,7 @@ _cmd_cleanup_target() {
   # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
   local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
   [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
+  _osrc_disk_resume_rec "$OSRC_JOBS/$target/disk-paused" 2>/dev/null   # a disk-paused job: let its supervisor run and reap
   local wj="$OSRC_JOBS/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
   [ -f "$wj" ] || wj="$OSRC_HOME/isolated/$target/worktree.json"   # foreground auto-isolated run
