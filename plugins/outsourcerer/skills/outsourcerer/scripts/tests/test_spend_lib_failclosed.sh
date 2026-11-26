@@ -34,6 +34,8 @@ probe() {  # sourced, the engine finds lib/ from $PWD, so run inside the copy
 
 mk intact
 case "$(probe x intact)" in "gate-rc=0 "*) ok "intact libs: a Free launch passes the real gate" ;; *) bad "intact: $(probe x intact)" ;; esac
+ln -s "$T/intact" "$T/link-intact"
+case "$(probe x link-intact)" in "gate-rc=0 "*) ok "intact libs via symlink: the real gate still runs" ;; *) bad "intact via symlink: $(probe x link-intact)" ;; esac
 
 mk nospend; rm -f "$T/nospend/lib/spend.sh"
 mk trunc;   head -n 300 "$ROOT/lib/spend.sh" > "$T/trunc/lib/spend.sh"
@@ -44,6 +46,10 @@ for v in nospend trunc unread syntax nocaps; do
   [ "$v" = unread ] && [ -r "$T/unread/lib/spend-paths.sh" ] && { ok "unread: skipped (running as root, chmod 000 is still readable)"; continue; }
   r="$(probe x "$v")"
   case "$r" in "gate-rc=70 session-rc=70 ") ok "$v: every gate refuses (rc 70)" ;; *) bad "$v: gates did not refuse: $r" ;; esac
+  # through a symlinked path (a PATH launcher, or macOS /var -> /private/var) the engine's realpath
+  # differs from SCRIPT_DIR, so the second lib loader re-sources lib/*.sh: it must not undo the stubs
+  ln -s "$T/$v" "$T/link-$v"; r="$(probe x "link-$v")"
+  case "$r" in "gate-rc=70 session-rc=70 ") ok "$v via symlink: every gate still refuses" ;; *) bad "$v via symlink: second loader restored gates: $r" ;; esac
 done
 
 # end to end: an interrupted update that lost lib/spend.sh launches nothing

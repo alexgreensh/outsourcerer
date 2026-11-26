@@ -300,7 +300,7 @@ SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
 # ---- durable state home (jobs, model cache, ledger). NEVER /tmp. ----
 OSRC_HOME="${OSRC_HOME:-$HOME/.outsourcerer}"
 OSRC_JOBS="$OSRC_HOME/jobs"
-for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib; _osrc_spend_libs_ok 2>/dev/null || for _osrc_lib in ${_OSRC_SPEND_GATE_FNS:-_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate}; do eval "$_osrc_lib() { echo \"ERROR: a spend/cap gate library under \$SCRIPT_DIR/lib is missing or damaged; refusing to launch anything. Reinstall outsourcerer.\" >&2; exit 70; }"; done; unset _osrc_lib
+for _osrc_lib in "$SCRIPT_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib; _osrc_spend_failclosed() { [ -z "${_OSRC_SPEND_BAD:-}" ] && _osrc_spend_libs_ok 2>/dev/null && return 0; _OSRC_SPEND_BAD=1; for _osrc_lib in ${_OSRC_SPEND_GATE_FNS:-_osrc_spend_gate _osrc_session_spend_gate _osrc_spend_ok _osrc_lane_spendable _osrc_dv_launch_prepare _osrc_dv_launch_id _osrc_session_relaunch_gated _osrc_session_model_gate _osrc_or_member_gate _osrc_cap_gate _osrc_session_cap_gate}; do eval "$_osrc_lib() { echo \"ERROR: a spend/cap gate library under \$SCRIPT_DIR/lib is missing or damaged; refusing to launch anything. Reinstall outsourcerer.\" >&2; exit 70; }"; done; unset _osrc_lib; }; _osrc_spend_failclosed  # sticky: re-run after the last lib load
 OSRC_MODELS_JSON="$OSRC_HOME/models.json"
 OSRC_LEDGER="$OSRC_HOME/ledger.jsonl"
 OSRC_SESSIONS="$OSRC_HOME/sessions"
@@ -18613,7 +18613,7 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
-[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; unset _osrc_lib
+[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || { unset _OSRC_LIBEND_SPEND _OSRC_LIBEND_SPENDPATHS _OSRC_LIBEND_DEVINFREE _OSRC_LIBEND_CAPS; for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; _osrc_spend_failclosed; }; unset _osrc_lib
 
 main() {
   # Mint this run's marker id once, and export it so the prompt the delegate receives and every
