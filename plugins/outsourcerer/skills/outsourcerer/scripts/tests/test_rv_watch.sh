@@ -102,6 +102,13 @@ case "$o" in *claude*) ! grep -q 'strict-mcp-config' <<<"$o" && ok "a session st
 o="$(OSRC_CLAUDE_USER_CONFIG=1 sx '_osrc_perm_restore_profile slean; SESSION_NAME=slean _session_relaunch_cc example-model high ""')"
 grep -q 'strict-mcp-config' <<<"$o" && ok "a session started lean relaunches lean from a full shell" || bad "lean relaunch: $o"
 
+echo "=== F31: an interactive Claude lane names its MCP mode at start ==="
+H="$(home f31)"
+o="$(sx 'SESSION_LAUNCH=(); _session_cc_mcp_flags' 2>&1)"
+grep -q 'MCP servers: none (lean default).*--with mcp=<names>, or OSRC_SESSION_MCP=full' <<<"$o" && ok "lean default says no servers and how to load them" || bad "lean note: $o"
+o="$(OSRC_SESSION_MCP=full sx 'SESSION_LAUNCH=(); _session_cc_mcp_flags' 2>&1)"
+grep -q 'MCP servers: full' <<<"$o" && ok "full mode says full" || bad "full note: $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"
