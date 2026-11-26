@@ -65,5 +65,19 @@ gate() { ( cd "$1" && unset OSRC_FACTORY_GATE && _osrc_disk_gate() { return 0; }
 # start <plan> <file> [args...]: `plan start` with the scheduler stubbed (no launch) -> output, rc in $?
 start() { ( cd "$REPO" && cmd_plan_run() { :; } && cmd_plan_start "$@" ) 2>&1; }
 
+if on F53; then
+  # The time cap stops an --auto-land run after a build is done: the captain is told to land it by hand,
+  # so a later `plan run` (without --auto-land) must not land it on its own.
+  mkplan cap53 't1||ship|0'; _task_update cap53 t1 '.state = "verifying"' >/dev/null; rm -f "$TMP/landed"
+  ( _FF_AUTO_LAND=1; _FF_DEADLINE=1; _ff_verify cap53 t1 "$(_task_list cap53)" ) > "$TMP/f53.out" 2>&1
+  t="$(_task_get cap53 t1)"
+  grep -q 'not landed: time cap reached' "$TMP/f53.out" && jq -e '.state == "done" and ((.auto_land_pending // false) | not) and (.land_error | test("time cap"))' >/dev/null <<<"$t" \
+    && ok "F53: at the time cap the build is done, not landed, and no landing is left pending" || bad "F53: after the cap: $(jq -c '{state, auto_land_pending, land_error}' <<<"$t")"
+  ( _FF_AUTO_LAND=0; _FF_DEADLINE=0; _ff_reconcile cap53 ) >/dev/null 2>&1
+  [ ! -s "$TMP/landed" ] && ok "F53: the next plan run without --auto-land does not land it" || bad "F53: reconcile landed $(cat "$TMP/landed")"
+  ( _FF_AUTO_LAND=1; _FF_DEADLINE=0; _ff_reconcile cap53 ) >/dev/null 2>&1
+  [ ! -s "$TMP/landed" ] && ok "F53: nor does a later --auto-land run (land_error stands until the captain lands it)" || bad "F53: --auto-land replay landed $(cat "$TMP/landed")"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

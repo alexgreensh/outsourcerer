@@ -565,7 +565,8 @@ _ff_verify() {
      && [ -z "$(printf '%s' "$t" | _ff_jq -r '.flow.name // ""')" ] && ! _ff_is_land_target "$tasks" "$tid"; then
     if _ff_out_of_time; then
       printf '  %s: not landed: time cap reached; land it with: %s\n' "$tid" "$(_ff_cmd "$plan" land "$tid")"
-      _task_update "$plan" "$tid" '.land_error = "not landed before the time cap"' >/dev/null 2>&1
+      # The captain was told to land it by hand: no automatic landing is left pending behind that.
+      _task_update "$plan" "$tid" '.land_error = "not landed before the time cap" | .auto_land_pending = false' >/dev/null 2>&1
       return 0
     fi
     _ff_auto_land "$plan" "$tid"
