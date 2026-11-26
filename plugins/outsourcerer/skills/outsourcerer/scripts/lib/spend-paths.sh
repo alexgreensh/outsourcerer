@@ -184,11 +184,14 @@ _osrc_dv_model_verify() {
     fi
     [ "$seen" = "$want" ] && return 0
   done
+  prev="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f2)"
   if [ -z "$seen" ]; then
-    echo "ERROR: session model: could not read which model the Devin picker selected, so the switch to $2 is UNVERIFIED (a fuzzy match can land on a paid sibling). Check now:  $0 session read   and stop the session if it shows another model." >&2
+    # Unreadable: put the pane back on the model the session record names, so the record (which the
+    # send, cap and watcher gates judge) never trails a model the pane may be running.
+    [ -n "$prev" ] && _session_model_restore_devin "$pane" "$prev" >/dev/null 2>&1
+    echo "ERROR: session model: could not read which model the Devin picker selected, so the switch to $2 is UNVERIFIED${prev:+ and was undone (back to $prev)} (a fuzzy match can land on a paid sibling). Check now:  $0 session read   and stop the session if it shows another model." >&2
     return 1
   fi
-  prev="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f2)"
   echo "ERROR: session model: the Devin picker selected $seen, not $2 (the model the spend gate judged).${prev:+ Switching back to $prev.} Re-run with the exact id:  $0 session model <id>" >&2
   [ -n "$prev" ] && _session_model_restore_devin "$pane" "$prev" >/dev/null 2>&1
   return 1

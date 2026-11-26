@@ -51,16 +51,26 @@ _osrc_cl_log() { printf '%s/cleanup.log' "$OSRC_HOME"; }
 # node_modules/.venv/__pycache__ are allowed unless secret-shaped (.env*, keys), case-folded.
 # A tracked file hidden by skip-worktree or assume-unchanged keeps it too. The removal is
 # logged before it runs (no log line, no removal) and its outcome after.
-_osrc_wt_remove() {
-  local st f b log; log="$(_osrc_cl_log)"
-  st="$(git -C "$2" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || return 2
+# _osrc_wt_kept_files <worktree> [caches] -> prints the untracked/ignored entries removal would
+# delete and the mode does not allow; rc 2 when git cannot list them (callers keep the worktree).
+_osrc_wt_kept_files() {
+  local st f b
+  st="$(git -C "$1" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || return 2
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    [ "${4:-}" = caches ] || return 2
-    case "$f" in '!! node_modules/'?*|'!! .venv/'?*|'!! __pycache__/'?*) ;; *) return 2 ;; esac
-    b="$(printf '%s' "${f##*/}" | tr '[:upper:]' '[:lower:]')"   # .ENV is .env on a case-insensitive disk
-    case "$b" in .env|.env.*|*.env|.envrc|.npmrc|.netrc|.pypirc|credentials|id_rsa|id_dsa|id_ed25519|id_ecdsa|*.pem|*.key|*.p12|*.pfx|*.jks) return 2 ;; esac
+    if [ "${2:-}" = caches ]; then
+      case "$f" in '!! node_modules/'?*|'!! .venv/'?*|'!! __pycache__/'?*)
+        b="$(printf '%s' "${f##*/}" | tr '[:upper:]' '[:lower:]')"   # .ENV is .env on a case-insensitive disk
+        case "$b" in .env|.env.*|*.env|.envrc|.npmrc|.netrc|.pypirc|credentials|id_rsa|id_dsa|id_ed25519|id_ecdsa|*.pem|*.key|*.p12|*.pfx|*.jks) ;; *) continue ;; esac ;;
+      esac
+    fi
+    printf '%s\n' "${f#?? }"
   done <<<"$st"
+}
+_osrc_wt_remove() {
+  local st f log; log="$(_osrc_cl_log)"
+  st="$(_osrc_wt_kept_files "$2" "${4:-}")" || return 2
+  [ -z "$st" ] || return 2
   # Tracked files marked skip-worktree (S) or assume-unchanged (lowercase tag) hide their edits
   # from status. One on disk whose content differs from the index keeps the worktree (a sparse
   # checkout's absent S files do not); a name git had to quote cannot be checked, so it keeps it.
@@ -791,10 +801,14 @@ _osrc_cleanup_target_refuses() {
     echo "  inspect: ls -la \"$path\"; force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi
-  if [ "$force" != 1 ] && [ -n "$(git -C "$path" status --porcelain --ignored --untracked-files=all 2>/dev/null)" ]; then
-    echo "[outsourcerer] REFUSING to remove $target: it holds untracked or ignored files that removal would delete." >&2
-    echo "  inspect: git -C \"$path\" status --ignored --untracked-files=all; force-remove: outsourcerer cleanup $target --force" >&2
-    return 1
+  if [ "$force" != 1 ]; then
+    local kept n; kept="$(_osrc_wt_kept_files "$path" caches)" || kept="(git could not list its files)"
+    if [ -n "$kept" ]; then n="$(printf '%s\n' "$kept" | wc -l | tr -d ' ')"
+      echo "[outsourcerer] REFUSING to remove $target: it holds $n untracked or ignored file(s) that removal would delete (rebuildable node_modules/.venv/__pycache__ caches are fine):" >&2
+      printf '%s\n' "$kept" | head -5 | sed 's/^/    /' >&2; [ "$n" -le 5 ] || echo "    ... and $((n - 5)) more" >&2
+      echo "  move or commit them, then rerun; or force-remove (skips every check): outsourcerer cleanup $target --force" >&2
+      return 1
+    fi
   fi
   return 0
 }
@@ -853,7 +867,7 @@ _cmd_cleanup_target() {
     # --force the removal goes through _osrc_wt_remove: ignored or hidden files keep it.
     local wrc=0
     if [ "$force" = 1 ]; then git -C "$maindir" worktree remove --force "$path" 2>/dev/null || wrc=1
-    else _osrc_wt_remove "$maindir" "$path" "cleanup $target"; wrc=$?
+    else _osrc_wt_remove "$maindir" "$path" "cleanup $target" caches; wrc=$?
     fi
     if [ "$wrc" = 2 ]; then
       echo "[outsourcerer] REFUSING to remove $target: it holds untracked, ignored or hidden files that removal would delete." >&2

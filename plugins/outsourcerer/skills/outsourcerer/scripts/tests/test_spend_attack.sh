@@ -296,6 +296,12 @@ if wait_log 'swe-1-7-max --respect' && [ "$rc" -eq 0 ]; then
     ok "model:a picker that selects another model than the gated id is caught and switched back"
   else bad "model:unverified pick (rc=$rc): $(printf '%s' "$out" | tail -2)"; fi
   rm -f "$LOG.pick"
+  # the picker's choice cannot be read (no catalog id on screen): undone, back to the recorded model (rv N4)
+  printf 'zz unreadable row\nzz\nzz\nzz\n' > "$LOG.pick"; : > "$LOG"; out="$(engine session model swe-1-7-high)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'UNVERIFIED and was undone (back to swe-1-7-max)' <<<"$out" && wait_log 'tui-input.*swe-1-7-max'; then
+    ok "model:an unreadable picker choice is undone back to the recorded model"
+  else bad "model:unreadable pick left in place (rc=$rc): $(printf '%s' "$out" | tail -2)"; fi
+  rm -f "$LOG.pick"
   : > "$LOG"; out="$(engine session model)"; rc=$?
   sleep 2
   if grep -q 'tui-input' "$LOG"; then bad "model:bare session model drove the picker with no consent (choice unknown)"

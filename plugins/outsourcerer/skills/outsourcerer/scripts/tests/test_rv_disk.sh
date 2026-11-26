@@ -53,7 +53,11 @@ echo "=== F3: cleanup <id> without --force keeps ignored and hidden-untracked fi
 mkwt "$R" job-ign; printf 'SECRET=1\n' > "$R/.outsourcerer/worktrees/job-ign/.env"
 o="$(run cleanup job-ign 2>&1)"; rc=$?
 [ "$rc" != 0 ] && [ -f "$R/.outsourcerer/worktrees/job-ign/.env" ] && [ -f "$OSRC_JOBS_T/job-ign/worktree.json" ] \
-  && grep -q 'REFUSING' <<<"$o" && ok "a gitignored .env keeps the worktree (rc=$rc)" || bad "ignored .env removed or not refused (rc=$rc): $o"
+  && grep -q 'REFUSING' <<<"$o" && grep -qx '    .env' <<<"$o" && ok "a gitignored .env keeps the worktree, and the refusal names it (rc=$rc)" || bad "ignored .env removed or not refused by name (rc=$rc): $o"
+# rv N3: rebuildable caches alone do not block a typed cleanup <id> (only --force did, which skips every check)
+mkwt "$R" job-nm; mkdir -p "$R/.outsourcerer/worktrees/job-nm/node_modules/pkg"; printf 'x\n' > "$R/.outsourcerer/worktrees/job-nm/node_modules/pkg/index.js"
+o="$(run cleanup job-nm 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ ! -d "$R/.outsourcerer/worktrees/job-nm" ] && ok "a worktree holding only node_modules is removed without --force" || bad "node_modules-only worktree refused (rc=$rc): $o"
 mkwt "$R" job-hid; git -C "$R/.outsourcerer/worktrees/job-hid" config status.showUntrackedFiles no
 printf 'notes\n' > "$R/.outsourcerer/worktrees/job-hid/notes.txt"
 o="$(run cleanup job-hid 2>&1)"; rc=$?
@@ -166,6 +170,14 @@ cp "$TMP/settings.f20" "$OSRC_HOME/disk-policy/settings"   # back to the suite f
 J=job-f20c; mkdir -p "$OSRC_JOBS_T/$J"; echo running > "$OSRC_JOBS_T/$J/status"
 printf 'since|%s\nproc|d|%s|0|gone\n' "$(( $(date +%s) - 120 ))" "$(osrc_test_dead_pid)" > "$OSRC_JOBS_T/$J/disk-paused"
 o="$(svk $J)"; [ "$o" != k=disk-paused ] && [ ! -f "$OSRC_JOBS_T/$J/disk-paused" ] && ok "a record naming only dead processes is dropped ($o)" || bad "dead-process record trusted: $o"
+# rv N6: past the grace, a stopped pid recorded without a start identity keeps the record (it cannot be
+# shown to be someone else's, and retiring it would report a still-stopped lane resumed).
+printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_CRITICAL_GB=0\nOSRC_DISK_PAUSE_GB=999999\n' > "$OSRC_HOME/disk-policy/settings"
+J=job-f20d; P="$(fakejob "$J")"; JD="$OSRC_JOBS_T/$J"; kill -STOP "$P"
+printf 'since|%s\nproc|d|%s|0|\n' "$(( $(date +%s) - 120 ))" "$P" > "$JD/disk-paused"
+[ "$(svk $J)" = k=disk-paused ] && [ -f "$JD/disk-paused" ] && stopped "$P" \
+  && ok "a stopped pid with no recorded identity keeps its pause record" || bad "unverifiable stopped pid retired: rec=$([ -f "$JD/disk-paused" ] && echo kept)"
+kill -CONT "$P" 2>/dev/null; cp "$TMP/settings.f20" "$OSRC_HOME/disk-policy/settings"
 
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

@@ -168,6 +168,13 @@ grep -q '^EVENT failed rcfail .*rcfail.RESULT reports rc=2' <<<"$o" && ! grep -q
   && ok "a failing RESULT emits failed, no review queued" || bad "rcfail events: $o"
 [ "$(rv 'osrc_remote_state rcfail')" = failed ] && ok "osrc_remote_state rcfail is failed" || bad "state: $(rv 'osrc_remote_state rcfail')"
 grep -q '^EVENT done rcok .*queued for review' <<<"$o" && ok "a RESULT with rc=0 is still READY for review" || bad "rcok events: $o"
+# rv N5: a failing RESULT committed first and READY in a later commit, polled only at the READY head.
+rv "OSRC_NOW=$NOW0 cmd_lane add rclate --branch cloud/rclate --repo '$REMOTE'" >/dev/null
+rpush cloud/rclate "result first" 'printf "sha=0000000\nrc=2\nconformance red\n" > rclate.RESULT' >/dev/null
+rpush cloud/rclate "then the marker" 'echo "READY rclate" > rclate.READY' >/dev/null
+o="$(rv "OSRC_NOW=$((NOW0+500)) osrc_remote_events")"
+grep -q '^EVENT failed rclate .*rclate.RESULT reports rc=2' <<<"$o" && ! grep -q '^EVENT done rclate' <<<"$o" \
+  && ok "a failing RESULT from an earlier commit still blocks the READY head's review" || bad "rclate events: $o"
 
 echo
 echo "passed: $pass  failed: $fail"

@@ -855,7 +855,11 @@ _osrc_disk_paused_live() {
   [ $(( $(date +%s) - since )) -ge 60 ] && [ -n "$(ps -o stat= -p "$$" 2>/dev/null)" ] \
     || { _osrc_disk_heartbeat >/dev/null 2>&1; return 0; }
   while IFS='|' read -r tag role pid grp sid; do
-    [ "$tag" = proc ] && _osrc_disk_same "$pid" "$sid" || continue
+    [ "$tag" = proc ] || continue
+    # A pid recorded without a start identity cannot be proven to be ours, nor proven not to be: while
+    # it is alive and stopped, the record stays (retiring it would report a still-paused lane resumed).
+    if [ -z "$sid" ]; then case "$pid" in ''|*[!0-9]*) continue ;; esac; kill -0 "$pid" 2>/dev/null || continue
+    else _osrc_disk_same "$pid" "$sid" || continue; fi
     st="$(ps -o stat= -p "$pid" 2>/dev/null)"
     case "$st" in *T*) _osrc_disk_heartbeat >/dev/null 2>&1; return 0 ;; esac
   done < "$rec"
