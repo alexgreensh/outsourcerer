@@ -18473,8 +18473,8 @@ $feedback"
     # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so the check would grade
     # unwritten files — and a false failure would also spend the next rung's money. The loop always waits.
     local _a0 _ael; _a0=$(date +%s)
-    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
-    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
+    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $(_osrc_escalate_spend_ok "$rung") "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
+    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "$(_osrc_escalate_next "$rung")" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     _ael=$(( $(date +%s) - _a0 ))
     local _skip_check=0 _result=fail cout="" crc=0
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then

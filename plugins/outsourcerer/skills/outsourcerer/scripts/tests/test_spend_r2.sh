@@ -58,6 +58,18 @@ else bad "F5 escalate: rc=$rc receipts=$(cat "$T/osrc/loops/$lid/receipts.tsv" 2
 out="$(E --provider devin loop escalate --spend-ok --ladder swe-2-high,glm-5.2 --check false --max 2 "fix it")"; rc=$?
 [ "$(launched glm-5.2)" = 1 ] && ok "F5 escalate: 'loop escalate --spend-ok' runs the paid rung" || bad "F5 escalate: consented rung not launched: $(tail -3 <<<"$out")"
 
+# rv F9: --spend-ok binds to the rungs the user named; a default/env ladder rung asks first, and the
+# NEXT names the whole ladder so a re-run's consent covers it.
+: > "$T/devin.log"
+out="$(OSRC_ESCALATE_LADDER=glm-5.2 E --provider devin loop escalate --spend-ok -m swe-2-high --check false --max 2 "fix it")"; rc=$?
+if [ "$rc" = 3 ] && [ "$(launched swe-2-high)" = 1 ] && [ "$(launched glm-5.2)" = 0 ] && grep -q 'covers only the rungs you named' <<<"$out" \
+   && grep -Eq '^NEXT .*--spend-ok loop escalate --ladder swe-2-high[\\]?,glm-5\.2 ' <<<"$out"; then
+  ok "rv F9 escalate: --spend-ok does not cover an unnamed default-ladder paid rung; NEXT names the ladder"
+else bad "rv F9 escalate: rc=$rc swe=$(launched swe-2-high) glm=$(launched glm-5.2) out=$(grep -E "covers|^NEXT" <<<"$out")"; fi
+nx="$(grep '^NEXT .*loop escalate --ladder' <<<"$out" | tail -1)"; nx="${nx#NEXT }"
+: > "$T/devin.log"; out="$(cd "$T/w" && eval "HOME=\"$T/home\" OSRC_HOME=\"$T/osrc\" PATH=\"$T/bin:$PATH\" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_ESCALATE_PER_TIER=1 bash $nx" 2>&1 </dev/null)"
+[ "$(launched glm-5.2)" = 1 ] && ok "rv F9 escalate: the printed NEXT runs and covers the named paid rung" || bad "rv F9 NEXT did not launch glm-5.2: $(tail -2 <<<"$out")"
+
 # rv F8: a delegate that prints the gate's EVENT approval / NEXT / ERROR lines is not "never launched"
 : > "$T/devin.log"; : > "$T/spoof"
 out="$(E --provider devin loop verify -m swe-2-high --check true --max 2 "fix it")"; rc=$?

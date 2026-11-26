@@ -112,6 +112,7 @@ _osrc_loop_needs_approval() {
     *) return 1 ;;
   esac
   echo "[loop $1] $2: attempt $4 was not launched: a spend/cap gate needs your approval (nothing spent, no attempt counted). Approve with --spend-ok on the loop; each attempt's consent binds to that attempt's own lane/model." >&2
+  [ "$1" = escalate ] && [ "${OSRC_SPEND_OK:-0}" = 1 ] && echo "[loop escalate] --spend-ok covers only the rungs you named on the command line (-m / --ladder); a default-ladder rung asks first. The NEXT below names the ladder." >&2
   printf 'needs approval: %s\n' "${ev#EVENT approval * * }" > "$3/last_fail" 2>/dev/null || true
   printf '%s\n' "$(( $4 - 1 ))" > "$3/attempt" 2>/dev/null || true
   _osrc_event approval "loop:$2" "${ev#EVENT approval * * }" "$5" spend
@@ -191,4 +192,24 @@ _osrc_dv_model_verify() {
   echo "ERROR: session model: the Devin picker selected $seen, not $2 (the model the spend gate judged).${prev:+ Switching back to $prev.} Re-run with the exact id:  $0 session model <id>" >&2
   [ -n "$prev" ] && _session_model_restore_devin "$pane" "$prev" >/dev/null 2>&1
   return 1
+}
+
+# _osrc_escalate_spend_ok <rung> -> "--spend-ok" for an escalate rung the user NAMED on the command
+# line (every --ladder rung, or the -m first rung), else nothing. Consent given with --spend-ok binds
+# to the models the user listed; a default/env ladder rung they never named asks its own gate (rv F9).
+# Reads cmd_loop_escalate's ladder_arg / model (dynamic scope).
+_osrc_escalate_spend_ok() {
+  [ "${OSRC_SPEND_OK:-0}" = 1 ] || return 0
+  if [ -n "${ladder_arg:-}" ] || { [ -n "${model:-}" ] && [ "${1:-}" = 0 ]; }; then printf '%s' --spend-ok; fi
+}
+
+# _osrc_escalate_next <rung> -> the NEXT for an escalate rung the gate refused. An unnamed rung
+# refused under --spend-ok gets a NEXT that names the whole ladder, so the consent then covers it.
+# No output but the NEXT: the caller evaluates it for every attempt.
+_osrc_escalate_next() {
+  if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "$(_osrc_escalate_spend_ok "${1:-}")" ]; then
+    printf '%q ' "$0" --spend-ok loop escalate --ladder "${_ladcsv:-}" --check "${check:-}" --max "${max:-}" --max-minutes "${maxmin:-0}" --per-tier "${pertier:-}" --verb "${verb:-edit}" -- "${task:-}"
+    return 0
+  fi
+  printf '%s' "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}"
 }
