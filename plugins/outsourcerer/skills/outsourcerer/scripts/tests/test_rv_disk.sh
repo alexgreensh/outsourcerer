@@ -117,5 +117,11 @@ rm -f "$W/.env"; find "$W" -exec touch -t 202001010000 {} + 2>/dev/null
 o="$(run cleanup --apply 2>&1)"
 [ ! -d "$W" ] && [ ! -d "$OSRC_JOBS_T/job-rc" ] && ok "once the worktree is SAFE both go in one apply" || bad "after SAFE: wt=$([ -d "$W" ] && echo kept) job=$([ -d "$OSRC_JOBS_T/job-rc" ] && echo kept): $o"
 
+echo "=== F15: an early match on a big listing is still a match (no SIGPIPE fail-open) ==="
+o="$(osrc "_waited_ids() { printf 'job-w\\n'; seq 1 300000; }; ls() { return 1; }; _osrc_job_collected job-w; echo rc=\$?" | tail -1)"
+[ "$o" = rc=1 ] && ok "a waited job early in a long wait list is not collected" || bad "waited job read as collected: $o"
+o="$(osrc "git() { if [ \"\$3\" = worktree ]; then printf 'branch refs/heads/br-x\\n'; seq 1 300000; else command git \"\$@\"; fi; }; _osrc_branch_checked_out /nowhere br-x; echo rc=\$?" | tail -1)"
+[ "$o" = rc=0 ] && ok "a branch early in a long worktree list is checked out" || bad "checked-out branch missed: $o"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

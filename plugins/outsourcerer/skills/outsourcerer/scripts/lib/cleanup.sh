@@ -145,7 +145,8 @@ _osrc_owner_known() {
 # the result delivered) and no running wait/fanout wait covers it.
 _osrc_job_collected() {
   ls -d "$OSRC_HOME/owners"/*/"$1" >/dev/null 2>&1 && return 1
-  _waited_ids 2>/dev/null | grep -qxF "$1" && return 1
+  local w; w="$(_waited_ids 2>/dev/null)"   # captured: an early grep -q match SIGPIPEs the writer (pipefail)
+  grep -qxF -- "$1" <<<"$w" && return 1
   return 0
 }
 
@@ -195,8 +196,11 @@ _osrc_branch_merged() {
 }
 
 # _osrc_branch_checked_out <repo> <branch> -> 0 when a worktree still has it checked out.
+# Captured first: under pipefail an early grep -q match SIGPIPEs git and reads as "not checked out".
+# A listing git cannot produce counts as checked out (the caller then keeps the branch).
 _osrc_branch_checked_out() {
-  git -C "$1" worktree list --porcelain 2>/dev/null | grep -qx "branch refs/heads/$2"
+  local l; l="$(git -C "$1" worktree list --porcelain 2>/dev/null)" || return 0
+  grep -qxF -- "branch refs/heads/$2" <<<"$l"
 }
 
 # _osrc_cleanup_verdict <manifest-json> -> prints "VERDICT<TAB>reason"
