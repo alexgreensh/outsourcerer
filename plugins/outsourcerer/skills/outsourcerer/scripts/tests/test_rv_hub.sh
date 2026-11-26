@@ -85,5 +85,17 @@ print(d["generated_at"], pa["name"], abs(pa.get("generated_at", 0) - now) < 30, 
   [ "$r" = "1000 A2 True False" ] && ok "F35: a one-project refresh keeps the doc's generated_at and stamps only that project" || no "F35: $r"
 fi
 
+# mkjob <id> <status> [reason] [exit] -> a job dir with a codex meta.json
+mkjob() { mkdir -p "$OSRC_JOBS/$1"; echo "$2" > "$OSRC_JOBS/$1/status"; echo '{"provider":"codex","verb":"run"}' > "$OSRC_JOBS/$1/meta.json"
+  [ -z "${3:-}" ] || echo "$3" > "$OSRC_JOBS/$1/reason"; [ -z "${4:-}" ] || echo "$4" > "$OSRC_JOBS/$1/exit"; }
+
+if on F36; then
+  mkjob f36 'done?' exited-0-without-OSRC-DONE 0
+  s1="$(lib eval 'osrc_done_state() { echo done; }; _osrc_hub_lane_job f36' | jq -r .status)"
+  s2="$(lib eval 'osrc_done_state() { echo not-done; }; _osrc_hub_lane_job f36' | jq -r .status)"
+  [ "$s1" = Done ] && ok "F36: a verified done contract reads Done even without the marker" || no "F36: verified contract shows $s1"
+  [ "$s2" = Unverified ] && ok "F36: no contract and no marker still reads Unverified" || no "F36: unverified shows $s2"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

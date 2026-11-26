@@ -112,8 +112,7 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   [ -f "$jd/worktree.json" ] && { wt="${wt:-$(jq -r '.path // ""' "$jd/worktree.json" 2>/dev/null)}"; br="${br:-$(jq -r '.branch // ""' "$jd/worktree.json" 2>/dev/null)}"; }
   reason="$(head -1 "$jd/reason" 2>/dev/null)"
   ds="$(_osrc_hub_done_state "$id")"
-  [ "$ds" = "done" ] && st="done"
-  case "$st:$reason" in done:exited-0-without-OSRC-DONE*) st='done?' ;; esac   # exit 0 is not proof of done
+  if [ "$ds" = done ]; then st=done; else case "$st:$reason" in done:exited-0-without-OSRC-DONE*) st='done?' ;; esac; fi   # a verified contract wins; exit 0 alone is no proof
   _osrc_hub_paused "$id" "$st" && st=paused
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "${reason:-$st}")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; note="${mapped#*|}"
