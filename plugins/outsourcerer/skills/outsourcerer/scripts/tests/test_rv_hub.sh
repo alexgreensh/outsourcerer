@@ -222,5 +222,17 @@ if on F46; then
   [ "$c" = '[{"id":"s46a","e":false},{"id":"s46b","e":false},{"id":"s46c","e":true}]' ] && ok "F46: one bad truth pass keeps every project (that one marked)" || no "F46: truth failure gave $c"
 fi
 
+if on F47; then
+  # A screen served from the cache because its refresh keeps failing says how old it is.
+  mkdir -p "$OSRC_HOME/hub/cache/scr"
+  printf '200 0 %s\nworking\nlast seen working\n' "$(( $(date +%s) - 300 ))" > "$OSRC_HOME/hub/cache/scr/s47"
+  q='_osrc_hub_memo_begin; printf "s47 100 200\n" > "$_OSRC_HUB_MEMO/tmux"; _osrc_hub_lane_live_fields "{\"id\":\"s47\",\"status\":\"Building\",\"note\":\"interactive session\"}" s47; _osrc_hub_memo_end'
+  r="$(OSRC_HUB_FAST=1 lib eval "$q" | jq -c '{state, stateAgeMin, note}')"
+  [ "$r" = '{"state":"working","stateAgeMin":5,"note":"interactive session; state from 5 min ago"}' ] && ok "F47: a stale cached screen carries 'state from N min ago'" || no "F47: $r"
+  printf '200 0 %s\nworking\nlast seen working\n' "$(date +%s)" > "$OSRC_HOME/hub/cache/scr/s47"
+  r="$(OSRC_HUB_FAST=1 lib eval "$q" | jq -c '{stateAgeMin, note}')"
+  [ "$r" = '{"stateAgeMin":null,"note":"interactive session"}' ] && ok "F47: a fresh screen carries no age note" || no "F47: fresh $r"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

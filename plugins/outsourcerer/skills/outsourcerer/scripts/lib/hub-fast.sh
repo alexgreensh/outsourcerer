@@ -325,6 +325,9 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
   # than forked here: live pane reads hammering the tmux server mid-export stall the export's own
   # tmux calls. Screen state is a display input; supervise confirms quiet lanes on its own cadence.
   printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
+  # A minute or more old: the lane says "state from N min ago" (_osrc_hub_lane_live_fields), so an
+  # answered approval or a dead pane is not shown as current while its refresh keeps failing.
+  [ $(( now - ep )) -lt 60 ] || [ -z "${_OSRC_HUB_MEMO:-}" ] || { mkdir -p "$_OSRC_HUB_MEMO/scrage" && printf '%s\n' "$(( (now - ep) / 60 ))" > "$_OSRC_HUB_MEMO/scrage/$id"; } 2>/dev/null
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "scr.$id.swr"
   tail -n +2 "$pf" 2>/dev/null
 }

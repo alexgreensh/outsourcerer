@@ -198,11 +198,15 @@ _osrc_hub_lane_state() {
 
 # _osrc_hub_lane_live_fields <lane-json> [id] -> the lane with state/startedAt/activeAt added.
 _osrc_hub_lane_live_fields() {
-  local lane="$1" id="${2:-}" ls
+  local lane="$1" id="${2:-}" ls age=""
   [ -n "$id" ] || id="$(jq -r '.id // ""' <<<"$lane" 2>/dev/null)"
   _osrc_hub_slug_ok "$id" && ls="$(_osrc_hub_lane_state "$id")" || { printf '%s' "$lane"; return 0; }
-  jq -c --arg s "${ls%% *}" --arg r "${ls#* }" '. + {state:$s} + (($r | split(" ") | map(tonumber? // 0)) as $t
-    | (if $t[0] > 0 then {startedAt:$t[0]} else {} end) + (if ($t[1] // 0) > 0 then {activeAt:$t[1]} else {} end))' <<<"$lane" 2>/dev/null || printf '%s' "$lane"
+  # The screen came from the cache, a minute or more old (lib/hub-fast.sh _osrc_hub_scr_get): say so.
+  [ -n "${_OSRC_HUB_MEMO:-}" ] && [ -f "$_OSRC_HUB_MEMO/scrage/$id" ] && IFS= read -r age < "$_OSRC_HUB_MEMO/scrage/$id"
+  case "$age" in ''|*[!0-9]*) age=0 ;; esac
+  jq -c --arg s "${ls%% *}" --arg r "${ls#* }" --argjson age "$age" '. + {state:$s} + (($r | split(" ") | map(tonumber? // 0)) as $t
+    | (if $t[0] > 0 then {startedAt:$t[0]} else {} end) + (if ($t[1] // 0) > 0 then {activeAt:$t[1]} else {} end))
+    | if $age > 0 then . + {stateAgeMin:$age, note:(((.note // "") | if . == "" then "" else . + "; " end) + "state from \($age) min ago")} else . end' <<<"$lane" 2>/dev/null || printf '%s' "$lane"
 }
 
 # ---- settled-project cache --------------------------------------------------------------------------
