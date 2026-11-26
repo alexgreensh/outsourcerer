@@ -128,4 +128,19 @@ _osrc_fanout_preflight() {
   return 0
 }
 
+# Per-task factory consent (torture-room arch F5, exact). `task add --spend-ok -m X` records X on
+# the task (a protected field: a tasks file or plan JSON cannot set it), and the confirmation names
+# X. Dispatch forwards --spend-ok only while the task still dispatches on exactly X; a retry or
+# escalation onto another model asks again. A command-level --spend-ok keeps the first-task bind.
+_osrc_task_spend_record() {  # <plan> <tid> <model>
+  [ -n "${3:-}" ] || { echo "outsourcerer: task add --spend-ok needs -m <model>: consent covers exactly the id it names. $2 was added without consent." >&2; return 1; }
+  _task_update "$1" "$2" '.spend_ok = $m' --arg m "$3" >/dev/null 2>&1 || return 1
+  printf '>>> [spend] consent recorded for %s on task %s (this id only; any other model it dispatches on asks again).\n' "$3" "$2" >&2
+}
+_osrc_task_spend_own() {  # <task-json> <dispatch-model> -> rc0 when the task's own consent covers it
+  _OSRC_TASK_OWN_CONSENT=0
+  [ -n "${2:-}" ] && [ "$(printf '%s' "$1" | jq -r '.spend_ok // ""' 2>/dev/null)" = "$2" ] || return 1
+  _OSRC_TASK_OWN_CONSENT=1
+}
+
 _OSRC_LIBEND_SPENDPATHS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)

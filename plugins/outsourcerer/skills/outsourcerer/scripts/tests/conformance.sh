@@ -98,6 +98,7 @@ _ALL_SUITES="$_ALL_SUITES test_devin_probe_strict"  # no-consent probe needs str
 _ALL_SUITES="$_ALL_SUITES test_launch_sites"        # every launch site names its spend gate
 _ALL_SUITES="$_ALL_SUITES test_spend_lib_failclosed" # a missing/truncated spend lib refuses launches
 _ALL_SUITES="$_ALL_SUITES test_hermetic_disk_home" # every launch home writes disk-policy settings
+_ALL_SUITES="$_ALL_SUITES test_spend_r2"  # live-test round 2: loop/fanout/supervise/receipt/case/factory consent
 _ALL_SUITES="$_ALL_SUITES test_spend_attack"        # attack every launch path; assert on launched argv
 _ALL_SUITES="$_ALL_SUITES test_remote_review"
 _ALL_SUITES="$_ALL_SUITES test_require_interactive"

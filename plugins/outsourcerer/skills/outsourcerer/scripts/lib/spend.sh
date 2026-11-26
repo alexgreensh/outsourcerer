@@ -514,12 +514,33 @@ _osrc_spend_ok() {
   _hd="$(head -n 1 "$mf" 2>/dev/null)"
   case "$_hd" in "#osrc-spend-ok token="*) mtok="${_hd#*=}" ;; *) return 1 ;; esac
   [ -n "$mtok" ] && [ "$mtok" = "$tok" ] || return 1
+  _osrc_job_marker_bound "$jd" || return 1
   [ -n "$lane" ] && [ -n "$model" ] || return 1
   while IFS='|' read -r l m; do
     [ -n "$l" ] && [ "$l" = "$lane" ] || continue
     [ -n "$m" ] && [ "$m" != "*" ] && [ "$m" = "$model" ] \
       && { _OSRC_SPEND_MARKER="$mf"; return 0; }
   done < "$mf"
+  return 1
+}
+
+# _osrc_job_marker_bound <jobdir> -> rc0 when this process runs under that job's own supervisor:
+# the engine minted the job (meta.json naming this id) and the recorded supervisor_pid is a live
+# ancestor (same start time when ps can tell). A forged jobs/<x>/.spend-ok plus two env vars, from
+# a process the engine never supervised, consents nothing (live-test F18).
+_osrc_job_marker_bound() {
+  local jd="$1" sp p i=0
+  [ -f "$jd/meta.json" ] && [ "$(jq -r '.id // ""' "$jd/meta.json" 2>/dev/null)" = "${jd##*/}" ] || return 1
+  while [ ! -s "$jd/supervisor_pid" ] && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i + 1)); done
+  sp="$(tr -d '[:space:]' < "$jd/supervisor_pid" 2>/dev/null)"
+  case "$sp" in ''|*[!0-9]*) return 1 ;; esac
+  _pid_start_file_match "$sp" "$jd/supervisor_pid_start" >/dev/null 2>&1; [ $? -eq 1 ] && return 1
+  p="$PPID"; i=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$i" -lt 32 ]; do
+    [ "$p" = "$sp" ] && return 0
+    if [ -r "/proc/$p/ppid" ]; then p="$(cat "/proc/$p/ppid" 2>/dev/null)"; else p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"; fi
+    i=$((i + 1))
+  done
   return 1
 }
 
@@ -627,6 +648,7 @@ _osrc_spend_marker_write() {
 # (torture-room arch F5). Outside a factory task (OSRC_TASK_REF unset) this is a no-op.
 _osrc_spend_task_bind() {
   case "${OSRC_TASK_REF:-}" in ?*/?*) ;; *) return 0 ;; esac
+  [ "${_OSRC_TASK_OWN_CONSENT:-0}" = 1 ] && return 0   # the task's own recorded consent (lib/spend-paths.sh)
   local bf="$OSRC_HOME/.spend-bind.$$" f p cur
   for f in "$OSRC_HOME"/.spend-bind.*; do       # prune bindings of commands that have exited
     [ -f "$f" ] || continue; p="${f##*.}"

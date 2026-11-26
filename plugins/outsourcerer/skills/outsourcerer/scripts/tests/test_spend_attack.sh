@@ -221,6 +221,11 @@ cp "$DOH/jobs/j1/.spend-ok" "$TMP/elsewhere/.spend-ok"
 refuses_paid "once:a job marker with another job's token grants nothing" "$out" "$rc" swe-1-7-max
 : > "$LOG"; out="$(export OSRC_JOB_DIR="$TMP/elsewhere" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
 refuses_paid "once:a marker outside the jobs dir grants nothing" "$out" "$rc" swe-1-7-max
+# A marker + token alone (no job the engine minted, no supervisor ancestor) is a forgery (live F18).
+: > "$LOG"; out="$(export OSRC_JOB_DIR="$DOH/jobs/j1" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
+refuses_paid "once:a forged job dir (no meta.json / supervisor) grants nothing" "$out" "$rc" swe-1-7-max
+# The job record a real bg launch leaves: meta.json naming the job, supervisor pid = an ancestor.
+printf '{"id":"j1"}\n' > "$DOH/jobs/j1/meta.json"; echo "$$" > "$DOH/jobs/j1/supervisor_pid"
 # The right token (the bg child's own secret) consents ONCE: the marker is consumed.
 : > "$LOG"; out="$(export OSRC_JOB_DIR="$DOH/jobs/j1" OSRC_JOB_TOKEN=t0k; engine run -m swe-1-7-max "say hi")"; rc=$?
 launched swe-1-7-max && ok "once:the job's own marker consents its one bound launch" || bad "once:job marker launch failed (rc=$rc)"
