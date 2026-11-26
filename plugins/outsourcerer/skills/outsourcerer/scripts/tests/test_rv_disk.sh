@@ -156,9 +156,13 @@ kill -CONT "$P"   # the record now lies: e.g. a monitor killed mid-resume
 o="$(svk $J)"
 [ "$o" != k=disk-paused ] && [ ! -f "$JD/disk-paused" ] && ! stopped "$P" \
   && ok "a stale record is dropped and the lane's real state is read ($o)" || bad "stale record trusted: $o rec=$([ -f "$JD/disk-paused" ] && echo kept)"
+# Pin the pause floor above any real disk for this case: the monitor that _osrc_disk_heartbeat starts
+# would otherwise read this machine's free space, resume the job and drop the record mid-check (seen under load).
+cp "$OSRC_HOME/disk-policy/settings" "$TMP/settings.f20"; printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_CRITICAL_GB=0\nOSRC_DISK_PAUSE_GB=999999\n' > "$OSRC_HOME/disk-policy/settings"
 J=job-f20b; P="$(fakejob "$J")"; JD="$OSRC_JOBS_T/$J"
 printf 'since|%s\nproc|d|%s|0|%s\n' "$(date +%s)" "$P" "$(osrc "_pid_start_identity $P")" > "$JD/disk-paused"
 [ "$(svk $J)" = k=disk-paused ] && [ -f "$JD/disk-paused" ] && ok "a record younger than the grace (pause in progress) is trusted" || bad "fresh record dropped"
+cp "$TMP/settings.f20" "$OSRC_HOME/disk-policy/settings"   # back to the suite floors
 J=job-f20c; mkdir -p "$OSRC_JOBS_T/$J"; echo running > "$OSRC_JOBS_T/$J/status"
 printf 'since|%s\nproc|d|%s|0|gone\n' "$(( $(date +%s) - 120 ))" "$(osrc_test_dead_pid)" > "$OSRC_JOBS_T/$J/disk-paused"
 o="$(svk $J)"; [ "$o" != k=disk-paused ] && [ ! -f "$OSRC_JOBS_T/$J/disk-paused" ] && ok "a record naming only dead processes is dropped ($o)" || bad "dead-process record trusted: $o"
