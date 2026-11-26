@@ -92,6 +92,16 @@ sleep 0.3
 kill -0 "$P" 2>/dev/null && grep -q 'rc=0 url=http://127.0.0.1:8799/?t=0123456789abcdef0123456789abcdef' <<<"$o" \
   && ok "the slow hub is kept and reused" || bad "slow hub: alive=$(kill -0 "$P" 2>/dev/null && echo y || echo n) $o"
 
+echo "=== F30: relaunch keeps the MCP mode the session started with, whatever the relaunching shell says ==="
+H="$(home f30)"
+sx() { OSRC_HOME="$H" OSRC_SOURCED=1 OSRC_CC_SPAWN_PROBE_TICKS=0 bash -c 'c="$1"; set --; . "$0" >/dev/null 2>&1; eval "$c"' "$SRC" "$1" 2>&1; }
+OSRC_CLAUDE_USER_CONFIG=1 sx 'SESSION_NAME=sfull _session_registry_append start cc example-model high started launch example-model 1' >/dev/null
+sx 'SESSION_NAME=slean _session_registry_append start cc example-model high started launch example-model 1' >/dev/null
+o="$(sx '_osrc_perm_restore_profile sfull; SESSION_NAME=sfull _session_relaunch_cc example-model high ""')"
+case "$o" in *claude*) ! grep -q 'strict-mcp-config' <<<"$o" && ok "a session started full relaunches full from a plain shell" || bad "full relaunch: $o" ;; *) bad "full relaunch: $o" ;; esac
+o="$(OSRC_CLAUDE_USER_CONFIG=1 sx '_osrc_perm_restore_profile slean; SESSION_NAME=slean _session_relaunch_cc example-model high ""')"
+grep -q 'strict-mcp-config' <<<"$o" && ok "a session started lean relaunches lean from a full shell" || bad "lean relaunch: $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"

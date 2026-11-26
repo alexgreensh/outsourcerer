@@ -17,6 +17,22 @@ _session_launch_cc() {
   _session_cc_mcp_flags
 }
 
+# _session_mcp_mode -> lean|full, the mode this shell's environment asks for (as _session_cc_mcp_flags
+# reads it). Session start records it; relaunch restores the recorded one (_session_mcp_restore).
+_session_mcp_mode() {
+  if [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ]; then printf lean
+  elif [ "${OSRC_CLAUDE_USER_CONFIG:-0}" = 1 ] || [ "${OSRC_SESSION_MCP:-lean}" = full ]; then printf full
+  else printf lean; fi
+}
+# _session_mcp_restore <session-id>: the MCP mode the session started with wins over the relaunching
+# shell's environment (registry start record, field 6). Records without it keep the environment's.
+_session_mcp_restore() {
+  case "$(_session_record "$1" 2>/dev/null | cut -f6)" in
+    full) OSRC_SESSION_MCP=full; OSRC_LEAN_LAUNCH=0 ;;
+    lean) OSRC_SESSION_MCP=lean; OSRC_CLAUDE_USER_CONFIG=0 ;;
+  esac
+}
+
 # _session_mcp_copy -> the private per-session copy of the declared MCP config. It can hold server env
 # tokens, so _session_registry_end (every stop, exit and failed launch) removes it.
 _session_mcp_copy() { printf '%s/sessions/mcp-%s.json' "$OSRC_HOME" "${SESSION_NAME:-$$}"; }
