@@ -109,7 +109,9 @@ _osrc_loop_needs_approval() {
 # caller's labels/a_model/a_prov/g_model/g_prov/route_spec. Pairs approved at an interactive prompt
 # consent their members (each member's marker binds to its own pair).
 _osrc_fanout_preflight() {
-  local verb="$1" i m p r seen=" " flag="${OSRC_SPEND_OK:-0}" asked=0
+  local verb="$1" i m p r seen=" " flag="${OSRC_SPEND_OK:-0}" asked=0 eng="$SCRIPT_PATH"
+  # The engine itself, even when it was sourced (SCRIPT_PATH is then the sourcing script).
+  [ -f "${_OSRC_FACTORY_DIR:-}/outsourcerer.sh" ] && eng="$_OSRC_FACTORY_DIR/outsourcerer.sh"
   for i in "${!labels[@]}"; do
     m="$g_model"; [ -z "$m" ] && [ -n "$route_spec" ] && m="$(_route_match "${labels[$i]}" "$route_spec")"
     [ -z "$m" ] && m="${a_model[$i]}"
@@ -120,7 +122,7 @@ _osrc_fanout_preflight() {
     [ "$flag" = 1 ] && _pf_spend=(--spend-ok)
     [ -n "$m" ] && _pf_args+=(-m "$m"); _pf_args+=("fanout preflight")
     r="$(OSRC_SPEND_OK= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$(( ${#_pf_provider[@]} / 2 ))" \
-         OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" _osrc_bg_preflight "$SCRIPT_PATH")" \
+         OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" _osrc_bg_preflight "$eng")" \
       || die "fanout: refusing to launch -- member ${labels[$i]} (${p:-$PROVIDER}${m:+ / $m}) failed the route preflight (spend/cap/dispatch, see above). Nothing was started."
     [ "$(printf '%s' "$r" | cut -d'|' -f5)" = 1 ] && asked=1
   done

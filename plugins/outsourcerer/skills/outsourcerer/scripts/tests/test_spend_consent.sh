@@ -329,6 +329,7 @@ FD="$TMP/notjobs/jd"; mkdir -p "$FD"; printf 'x\n' > "$FD/.spend-ok"
 # Marker consent (no flag) still binds the exact pair and records the path for the gate.
 JD2="$OSRC_HOME/jobs/job-r6mark"; mkdir -p "$JD2"
 printf '#osrc-spend-ok token=tokR6\ndv|glm-5.2\n' > "$JD2/.spend-ok"
+printf '{"id":"job-r6mark"}\n' > "$JD2/meta.json"; echo "$PPID" > "$JD2/supervisor_pid"   # the job record a real launch leaves
 OSRC_JOB_DIR="$JD2" OSRC_JOB_TOKEN=tokR6 OSRC_SPEND_OK=0 _osrc_spend_ok dv glm-5.2; rc=$?
 { [ $rc -eq 0 ] && [ "$_OSRC_SPEND_MARKER" = "$JD2/.spend-ok" ]; } \
   && ok "r6 marker: marker consent still binds exact pair" \

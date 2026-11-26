@@ -76,4 +76,58 @@ mktemp template in test_spend_attack). All 4 are fixed in 182061e.
 
 ## Round 2
 
-In progress (live-test findings 3, 5, 6, 7, 8, 16, 18; fail-closed second loader; hermetic r3.4; factory per-task consent).
+Base: round-1 head 06b90b1 (kept). Branch `cloud/osrc-fx-spend-r2`. These are the live-test findings
+from the 0.18.0 sandbox run, plus three orchestrator findings. `outsourcerer.sh` stays at 18835 lines:
+every edit is on an existing line, or is paired with a trimmed comment line. New code is in `lib/`
+(spend.sh 987 lines, spend-paths.sh about 180 lines).
+
+| Finding | Fix | Regression test (fails on 06b90b1) |
+|---------|-----|------------------------------------|
+| orch: the second lib loader undoes the fail-closed stubs (Mac `/var` symlink, PATH launcher symlink) | The fail-closed decision is now a function, `_osrc_spend_failclosed`, still on line 303. The second (realpath) loader clears the four lib sentinels, re-sources the libs and re-runs the decision. A damaged lib is therefore judged after the LAST load. When the second loader legitimately rescues a wrong `SCRIPT_DIR`, the launch still passes. | `test_spend_lib_failclosed`: each damaged variant is also probed through a symlinked copy (`ln -s`), plus an intact-through-symlink row. On 06b90b1, `syntax` and `nocaps` via symlink give `gate-rc=0 session-rc=1`, the exact Mac signature. |
+| orch: r3.4 e2e is not hermetic | `$PACAT/osrc` and `$MCAT/osrc` (test_spend_consent) and the `$sandbox` homes (test_no_phantom_jobs) write `disk-policy/settings` with both floors set to 0. | New `test_hermetic_disk_home`, registered in conformance. It is a static scan: every OSRC_HOME a test launches the engine from (run, bg, fanout, loop, session start) must write its disk settings. Bg preflight dry runs are exempt because they skip the disk gate. The suite has a self-test. On 06b90b1 it flags these 4 homes. |
+| F3: `session send "/model X"` is ungated | `_osrc_session_send_model_gate` (lib/spend-paths.sh) runs on the same line as the cap check in tmux `session send`, and before the winpty send. It matches a first token of `/model` in any case, after leading blanks. With one plain id after it, it runs `_osrc_session_model_gate` on the session's recorded provider, and NEXT is `--spend-ok session model <id>`. `/model` alone, or with more text after the id, is refused with a pointer to `session model <name>`. | `test_spend_attack` send-model rows (4). All 4 fail on base: the pane receives `/model swe-2-1-high`. |
+| F5: loop counts spend refusals as check failures, and has no consent path | After each attempt, `_osrc_loop_needs_approval` looks for the child's `EVENT approval` line or the fail-closed refusal. The loop then stops as `needs-approval` (rc 3) with one EVENT + NEXT. It grades no check, counts no attempt (resume re-runs it), does not escalate and writes no receipt. `--spend-ok` is accepted anywhere before `--` in `loop verify`, `loop escalate` and `loop resume`. It reaches each attempt's child as argv `--spend-ok`, and each child binds that consent to its own rung's lane/model pair. NEXT is `--spend-ok loop resume <id>` for verify, because `needs-approval` is resumable. Escalate is not resumable, so its NEXT is the original command with `--spend-ok`. | `test_spend_r2` F5 rows (5) |
+| F6: fanout says "all N launched", then N jobs exit nonzero | `_osrc_fanout_preflight` runs bg's route preflight once per distinct provider/model pair, before any job is minted. Pairs use the members' own precedence: -m > --route > frontmatter > default. One refusal refuses the whole fanout ("Nothing was started") with the preflight's EVENT/NEXT, and NEXT is the fanout command with `--spend-ok`. A pair approved at an interactive prompt consents its own members. The preflight always runs the engine, even when the engine was sourced. | `test_spend_r2` F6 rows (2). test_p56_r2's marker-writer fixture now stubs the preflight, like its other launch stubs. |
+| F7: supervise never replays spend events | `_osrc_event` adds `job`, taken from a valid `OSRC_JOB_DIR`. It also adds `owner`: the owner marker of that job, else `_owner_sid`. Supervise keeps rows whose `.owner` is the orchestrator, so a refusal by a fanout member or bg child now wakes it. `target` stays the lane, so no EVENT line changes. | `test_spend_r2` F7 rows: the row carries owner and job, and `supervise --session S7 --once` prints the approval. |
+| F8: the gate says "bills metered", then the run says "$0 cash" and `[free-tier]` | The gate records its verdict in `_OSRC_GATE_BILL`. When the gate judged the lane metered or unknown, `_osrc_gate_paid` suppresses Devin's free-tier banner. The receipt then reads "billed as paid (metered; approved with --spend-ok)" (`_osrc_receipt_disclosure`). The gate is the single source of truth. | `test_spend_r2` F8 rows (2) |
+| F16: model aliases are case-sensitive | `resolve_model_row` prefers the exact row, then falls back to a case-folded one. Folding is for routing only: the launched id is the table's exact id. `-m SOL` now takes the codex row, and `-m SWE-2-HIGH` launches the Free `swe-2-high`. A refused Devin id that case-folds to a proven-Free id now gets `EVENT failed … did you mean <id> (free)?`. Its NEXT uses the lowercase id and has no `--spend-ok`. | `test_spend_r2` F16 rows (3) |
+| F18: a forged `jobs/<x>/.spend-ok` plus two env vars consents | Marker-only consent (no forwarded flag) also requires `_osrc_job_marker_bound`. That check needs a `meta.json` naming this job id, and needs the recorded `supervisor_pid` to be a live ancestor of this process. The ancestor walk reads `/proc/<pid>/ppid` or `ps -o ppid=`. When `ps` can report it, the supervisor's start time must match too. | `test_lane_billing` (forged dir without meta.json; supervisor not an ancestor) and `test_spend_attack` (a forged dir with the right token is refused). The fixtures that model a real job now write meta.json and an ancestor pid. |
+| orch: factory consent binds to the first task | `task add --spend-ok -m X` records `spend_ok: X` on the task, and the confirmation names X. `spend_ok` is a protected field, so a tasks file or plan JSON cannot set it. `_task_dispatch` forwards `--spend-ok` only while the task still dispatches on exactly X, so a retry or escalation onto another model asks again. A task with its own consent skips the command-level first-task bind. `--spend-ok` without `-m` is refused. | `test_spend_r2` F5' rows (5) |
+
+`test_spend_r2` is new and registered: 19 rows. Against the 06b90b1 engine it gives 5 passed and
+14 failed. The 5 that pass are guard rows (a Free model still launches, `spend_ok` is set only by
+the flag, and so on).
+
+### Tests run (Linux, bash 5, uid 0, niced, one at a time)
+
+BATCH_RESULTS
+
+### What remains unproven (round 2)
+
+- Not run on macOS or Git Bash. The symlinked-path rows reproduce the Mac loader failure on Linux.
+  The `unread` row still skips as root here, because chmod 000 stays readable.
+- F18: the ancestor walk uses `/proc/<pid>/ppid` (Git Bash/MSYS) or `ps -o ppid=` (macOS/Linux).
+  If neither works, marker-only consent fails closed and the job asks with its own EVENT/NEXT. The
+  forwarded-flag path is unaffected. A process that fakes a supervisor (writes its own pid and a
+  meta.json, then runs the engine as its child) can still self-consent. That is no stronger than
+  passing `--spend-ok`. The token is not stored as a hash.
+- F3 maps only `/model`. No lane in the engine drives another typed model-switch command; Devin's
+  picker is Meta-m, which `session send` cannot type.
+- The factory's command-level `--spend-ok` keeps round 1's first-task bind for tasks that carry no
+  consent of their own.
+
+### Open questions (decided by the lane, round 2)
+
+- Loop consent goes to each attempt as argv `--spend-ok`, not as a bg-style marker. Attempts are
+  foreground children of the loop, and argv is the channel the engine already treats as explicit.
+  Each child binds the consent to the first pair it gates, which is that rung's lane/model.
+- `needs-approval` returns rc 3, the same as `blocked`, because a human must act. `loop verify` can resume it.
+- F7 keeps `target` as the lane and adds `owner` and `job`. Re-targeting to the job id would change
+  every EVENT line, and consumers grep those.
+- The F16 hint uses kind `failed`, not `approval`: it is a typo, not a spend question.
+- The brief says `task new`; this repo's command is `task add`, so the flag lives there.
+
+### Needs from other lanes (round 2)
+
+- Supervise owners: `_sv_read_range` could also match `.job` against the owned target set. The
+  owner stamp already covers the reported case.
