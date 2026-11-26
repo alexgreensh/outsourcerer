@@ -393,7 +393,7 @@
       if (!need) li.append(el('span', 'gs', 'Nothing waiting'));
       const ul = el('div', 'gneed');
       decs.slice(0, 4).forEach(({ p, d }) => {
-        const b = el('button', 'gnd'); b.type = 'button'; b.id = 'gn-' + p.id + '-' + d.id; b.title = d.q || '';
+        const b = el('button', 'gnd'); b.type = 'button'; b.id = 'gn-' + (d.owner || p.id) + '-' + d.id; b.title = d.q || '';
         b.append(pri(d.weight), el('span', 'gndt', d.short || d.q));
         b.addEventListener('click', (e) => { e.stopPropagation(); go(p.id, (d.owner || p.id) + '-' + d.id); });
         ul.append(b);
@@ -492,7 +492,7 @@
           const li = el('li', 'tprow' + (dsi ? ' stale' : '')); const q = el('div', 'tpq'); q.append(el('span', 'tpn', p.name), el('span', 'tpt', d.short || d.q));
           if (dsi) q.append(el('span', 'tp-stale', dsi.text));
           // Only the first Decide is filled; the rest are ghost buttons so the eye lands on one call to action.
-          const b = el('button', 'go' + (ul.children.length ? ' ghost' : '')); b.type = 'button'; b.id = 'tp-' + p.id + '-' + d.id; b.append(document.createTextNode('Decide'), ic('arrow-right')); b.setAttribute('aria-label', 'Decide: ' + (d.short || d.q));
+          const b = el('button', 'go' + (ul.children.length ? ' ghost' : '')); b.type = 'button'; b.id = 'tp-' + (d.owner || p.id) + '-' + d.id; b.append(document.createTextNode('Decide'), ic('arrow-right')); b.setAttribute('aria-label', 'Decide: ' + (d.short || d.q));
           b.addEventListener('click', () => go(p.id, (d.owner || p.id) + '-' + d.id));
           const chev = ic('chevron-right'); chev.setAttribute('class', 'chev');
           li.append(pri(d.weight), q, b, chev); ul.append(li);

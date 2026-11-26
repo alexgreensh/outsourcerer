@@ -234,5 +234,14 @@ if on F47; then
   [ "$r" = '{"stateAgeMin":null,"note":"interactive session"}' ] && ok "F47: a fresh screen carries no age note" || no "F47: fresh $r"
 fi
 
+if on F48; then
+  # Two sessions' D1 on one merged card: the Home buttons carry the owning session, as the decision cards do.
+  H="$LIB/hub-assets/hub-home.js"
+  for k in gn tp; do
+    grep -Fq "b.id = '$k-' + p.id + '-' + d.id" "$H" && no "F48: $k- button ids use the card id, not the decision owner" \
+      || { grep -Fq "b.id = '$k-' + (d.owner || p.id) + '-' + d.id" "$H" && ok "F48: $k- button ids carry the decision owner" || no "F48: no $k- button id found"; }
+  done
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
