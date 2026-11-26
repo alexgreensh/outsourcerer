@@ -89,5 +89,20 @@ git -C "$R" branch -q lane-f12 main
 o="$(osrc "_osrc_branch_merged() { echo \"argc=\$# \${3:-}\"; return 1; }; _osrc_disk_lane_sha \"$R\" lane-f12 \$(git -C \"$R\" rev-parse main)")"
 [ "$o" = "argc=2 " ] && ok "_osrc_disk_lane_sha asks _osrc_branch_merged with repo and branch only" || bad "lane sha passed: $o"
 
+echo "=== F13: cleanup <id> refuses before it kills; fanout reports per member ==="
+mkwt "$R" job-live; printf 'wip\n' > "$R/.outsourcerer/worktrees/job-live/wip.txt"
+sleep 300 </dev/null >/dev/null 2>&1 & LP=$!; KILL="$KILL $LP"; echo "$LP" > "$OSRC_JOBS_T/job-live/pid"; echo running > "$OSRC_JOBS_T/job-live/status"
+o="$(run cleanup job-live 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q REFUSING <<<"$o" && kill -0 "$LP" 2>/dev/null \
+  && ok "a running dirty lane is refused and left running" || bad "running lane killed or not refused (rc=$rc): $o"
+o="$(run cleanup job-live --force 2>&1)"; rc=$?
+sleep 0.3; ! kill -0 "$LP" 2>/dev/null && [ "$rc" = 0 ] && ok "--force still stops the lane and removes it" || bad "--force on a live lane (rc=$rc): $o"
+mkwt "$R" fo-a; mkwt "$R" fo-b; printf 'wip\n' > "$R/.outsourcerer/worktrees/fo-b/wip.txt"
+mkdir -p "$OSRC_HOME/fanout/fo-g"; printf 'fo-a\tA\nfo-b\tB\n' > "$OSRC_HOME/fanout/fo-g/members.tsv"
+o="$(run cleanup fo-g 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'cleaned fanout' <<<"$o" && grep -q 'NOT cleaned: fo-b' <<<"$o" \
+  && [ ! -d "$R/.outsourcerer/worktrees/fo-a" ] && [ -d "$R/.outsourcerer/worktrees/fo-b" ] \
+  && ok "fanout cleanup names the member it kept and fails" || bad "fanout summary (rc=$rc): $o"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

@@ -743,44 +743,11 @@ _osrc_disk_gate() {
 
 _osrc_disk_admit() { [ "${_OSRC_DISK_KIND:-probe}" = probe ] || _osrc_disk_register_caller "$_OSRC_DISK_KIND" || true; }
 
-# =============================================================================
-# cmd_cleanup <job-id|fanout-gid> [--force] -> remove a job's (or a whole fanout's) git
-# worktree(s). CONSERVATIVE: refuses to delete a worktree with uncommitted (dirty) or
-# unmerged (ahead>0) work unless --force. Isolation is automatic; destruction is
-# deliberate. With NO target this is the manifest dry run (see header); --apply deletes
-# SAFE items only; --ack acknowledges the ASK list.
-# =============================================================================
-_cmd_cleanup_target() {
-  local force="$2" target="$1"
-  local gd; gd="$(_fanout_dir "$target")"
-  if [ -f "$gd/members.tsv" ]; then       # a fanout gid -> clean each member
-    local jid label; while IFS="$(printf '\t')" read -r jid label; do
-      [ -n "$jid" ] || continue
-      if [ "$force" = 1 ]; then cmd_cleanup "$jid" --force; else cmd_cleanup "$jid"; fi
-    done < "$gd/members.tsv"
-    echo "[outsourcerer] cleaned fanout $target"; return 0
-  fi
-  # Cleanup can race a live supervisor (or recover after one was killed).  Stop the delegate's
-  # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
-  local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
-  [ -n "$live_pid" ] && _kill_job "$OSRC_JOBS/$target" "$live_pid"
-  _osrc_disk_resume_rec "$OSRC_JOBS/$target/disk-paused" 2>/dev/null   # a disk-paused job: let its supervisor run and reap
-  local wj="$OSRC_JOBS/$target/worktree.json"
-  [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
-  [ -f "$wj" ] || wj="$OSRC_HOME/isolated/$target/worktree.json"   # foreground auto-isolated run
-  [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
-  have jq || die "cleanup needs jq"
-  local path branch dirty ahead base rp
-  path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
-  # Never trust the serialized path: a lexical glob can be bypassed with
-  # worktrees/../../..., so canonicalize and require strict containment first.
-  # Worktrees live at <repo>/.outsourcerer/worktrees/<id> (see _worktree_setup), NOT
-  # under $OSRC_HOME — anchor on the canonical path's own shape, with the trailing
-  # component bound to the id being cleaned so one job's receipt cannot point at
-  # another job's worktree.
-  case "$path" in *'..'*) die "refusing to remove path containing '..': $path" ;; esac
-  rp="$(cd "$path" 2>/dev/null && pwd -P)" || die "refusing to remove non-canonical worktree path: $path"
-  case "$rp" in */.outsourcerer/worktrees/"$target") path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
+# _osrc_cleanup_target_refuses -> 1 (with the reason on stderr) when `cleanup <id>` must keep the
+# worktree. Reads the caller's target/force/path/branch/base/wj/maindir; LIVE git state, so it runs
+# before the job is stopped (a refusal never kills a lane) and again after (the lane may have written).
+_osrc_cleanup_target_refuses() {
+  local dirty ahead livehead
   # Re-read LIVE git state, not the job-completion snapshot: anything edited after the job (user, hook,
   # another process) must be seen, or --force could destroy it. Fall back to the json only if the worktree
   # is already gone.
@@ -791,9 +758,6 @@ _cmd_cleanup_target() {
   else
     dirty="$(jq -r '.dirty' "$wj")"; ahead="$(jq -r '.ahead // 0' "$wj")"
   fi
-  # The parent may itself be a linked worktree (its .git is a FILE): ask git, not `-d .git`.
-  local maindir="${path%/.outsourcerer/worktrees/*}" livehead
-  git -C "$maindir" rev-parse --git-dir >/dev/null 2>&1 || maindir=""
   # A branch with no commits past its recorded base can still hold the LAST ref to that base
   # (cut from a local-only branch that was later deleted): deleting it would orphan those commits.
   # A worktree whose live HEAD is not the recorded branch (detached at a local-only base, the
@@ -825,6 +789,62 @@ _cmd_cleanup_target() {
     echo "  inspect: ls -la \"$path\"; force-remove: outsourcerer cleanup $target --force" >&2
     return 1
   fi
+  if [ "$force" != 1 ] && [ -n "$(git -C "$path" status --porcelain --ignored --untracked-files=all 2>/dev/null)" ]; then
+    echo "[outsourcerer] REFUSING to remove $target: it holds untracked or ignored files that removal would delete." >&2
+    echo "  inspect: git -C \"$path\" status --ignored --untracked-files=all; force-remove: outsourcerer cleanup $target --force" >&2
+    return 1
+  fi
+  return 0
+}
+
+# =============================================================================
+# cmd_cleanup <job-id|fanout-gid> [--force] -> remove a job's (or a whole fanout's) git
+# worktree(s). CONSERVATIVE: refuses to delete a worktree with uncommitted (dirty) or
+# unmerged (ahead>0) work unless --force. Isolation is automatic; destruction is
+# deliberate. With NO target this is the manifest dry run (see header); --apply deletes
+# SAFE items only; --ack acknowledges the ASK list.
+# =============================================================================
+_cmd_cleanup_target() {
+  local force="$2" target="$1"
+  local gd; gd="$(_fanout_dir "$target")"
+  if [ -f "$gd/members.tsv" ]; then       # a fanout gid -> clean each member
+    # Each member in its own subshell: one member's die must not skip the rest or the summary.
+    local jid label n=0 kept=""; while IFS="$(printf '\t')" read -r jid label; do
+      [ -n "$jid" ] || continue; n=$((n+1))
+      if [ "$force" = 1 ]; then ( cmd_cleanup "$jid" --force ) </dev/null; else ( cmd_cleanup "$jid" ) </dev/null; fi \
+        || kept="${kept:+$kept }$jid"
+    done < "$gd/members.tsv"
+    [ -z "$kept" ] && { echo "[outsourcerer] cleaned fanout $target ($n member(s))"; return 0; }
+    echo "[outsourcerer] fanout $target: NOT cleaned: $kept (reasons above); the other member(s) were." >&2; return 1
+  fi
+  local wj="$OSRC_JOBS/$target/worktree.json"
+  [ -f "$wj" ] || wj="$OSRC_HOME/loops/$target/worktree.json"
+  [ -f "$wj" ] || wj="$OSRC_HOME/isolated/$target/worktree.json"   # foreground auto-isolated run
+  [ -f "$wj" ] || { echo "[outsourcerer] $target has no worktree to clean."; return 0; }
+  have jq || die "cleanup needs jq"
+  local path branch base rp
+  path="$(jq -r '.path' "$wj")"; branch="$(jq -r '.branch' "$wj")"; base="$(jq -r '.base_sha // ""' "$wj")"
+  # Never trust the serialized path: a lexical glob can be bypassed with
+  # worktrees/../../..., so canonicalize and require strict containment first.
+  # Worktrees live at <repo>/.outsourcerer/worktrees/<id> (see _worktree_setup), NOT
+  # under $OSRC_HOME — anchor on the canonical path's own shape, with the trailing
+  # component bound to the id being cleaned so one job's receipt cannot point at
+  # another job's worktree.
+  case "$path" in *'..'*) die "refusing to remove path containing '..': $path" ;; esac
+  rp="$(cd "$path" 2>/dev/null && pwd -P)" || die "refusing to remove non-canonical worktree path: $path"
+  case "$rp" in */.outsourcerer/worktrees/"$target") path="$rp" ;; *) die "refusing to remove path outside worktree root: $path" ;; esac
+  # The parent may itself be a linked worktree (its .git is a FILE): ask git, not `-d .git`.
+  local maindir="${path%/.outsourcerer/worktrees/*}"
+  git -C "$maindir" rev-parse --git-dir >/dev/null 2>&1 || maindir=""
+  _osrc_cleanup_target_refuses || return 1
+  # Cleanup can race a live supervisor (or recover after one was killed). Stop the delegate's
+  # complete tree before removing its worktree so grandchildren cannot survive as poisoned orphans.
+  local live_pid; live_pid="$(cat "$OSRC_JOBS/$target/pid" 2>/dev/null)"
+  if [ -n "$live_pid" ] && kill -0 "$live_pid" 2>/dev/null; then
+    _kill_job "$OSRC_JOBS/$target" "$live_pid"
+    _osrc_cleanup_target_refuses || return 1
+  fi
+  _osrc_disk_resume_rec "$OSRC_JOBS/$target/disk-paused" 2>/dev/null   # a disk-paused job: let its supervisor run and reap
   if [ -n "$maindir" ]; then
     # Keep the receipt when git cannot remove the worktree or branch: a silent rm -rf would
     # leave the registration and branch behind with nothing left to find them by. Without
