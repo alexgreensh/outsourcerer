@@ -53,8 +53,8 @@ stopped "$P" && ok "the job's delegate is SIGSTOPped" || bad "setup: delegate no
 o="$(osrc "$H" "_status_line $J")"
 grep -q "^$J paused .*Paused: disk below 500.0G" <<<"$o" && ok "status shows paused and the pause floor" || bad "status: $o"
 o="$(osrc "$H" "_osrc_hub_lane_job $J")"
-[ "$(jq -r .status <<<"$o")" = Blocked ] && [ "$(jq -r .note <<<"$o" | cut -c1-19)" = "Paused: disk below " ] \
-  && ok "hub lane is Blocked with the pause note" || bad "hub lane: $o"
+[ "$(jq -r .status <<<"$o")" = Paused ] && [ "$(jq -r .note <<<"$o" | cut -c1-19)" = "Paused: disk below " ] \
+  && ok "hub lane is Paused with the exact pause note" || bad "hub lane: $o"
 o="$(osrc "$H" "_osrc_hub_lane_state $J")"
 [ "${o%% *}" = limit ] && ok "lane-truth state is limit (attention: limit)" || bad "lane state: $o"
 o="$(osrc "$H" "SCRIPT_PATH=x; _sv_observe_emit $J \$(date +%s) supervise owner1; _sv_observe_emit $J \$(date +%s) supervise owner1
