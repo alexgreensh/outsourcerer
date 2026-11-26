@@ -699,7 +699,7 @@ $w" ;;
   # its output cannot disappear into that refresh's temporary file.
   local child="" signalled=0
   export OSRC_SUPERVISE_AUTO="$auto" OSRC_SUPERVISE_LOOP="$loop"
-  w="$OSRC_HOME/supervise/$sid/loop.$$"; [ "$loop" = 0 ] || { mkdir -p "${w%/*}" && printf '%s\n' ${ids:-'*'} > "$w" && touch -t 200001010000 "$w"; } || return 2
+  w="$OSRC_HOME/supervise/$sid/loop.$$"; [ "$loop" = 0 ] || { mkdir -p "${w%/*}" && printf '%s\n' ${ids:-'*'} > "$w" && touch -t 200001010000 "$w"; } || { _sv_fail "cannot write the loop marker" "$rearm"; return 2; }
   trap 'if [ "$signalled" = 0 ]; then signalled=1; _sv_fail "killed by a signal" "$rearm"; fi; kill -TERM "$child" 2>/dev/null' TERM INT HUP
   while [ "$signalled" = 0 ]; do
     ( _sv_main "$sid" "$once" $ids ) & child=$!
