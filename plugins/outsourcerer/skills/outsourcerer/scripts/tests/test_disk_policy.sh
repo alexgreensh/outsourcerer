@@ -38,7 +38,11 @@ bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 mkrepo() { local d="$1"; mkdir -p "$d/state"; ( cd "$d" && git init -q && printf 'v1\n' > app.txt \
   && echo K=v > .env.example && echo s > state/keep.txt \
   && printf '.env\nnode_modules/\nout/\n' > .gitignore && git add -A && git commit -qm init ); }
-age() { find "$@" -exec touch -t 202001010000 {} + 2>/dev/null; }
+# age <path...> -> mtime/atime 3 hours ago: past cleanup's 1h rule, yet far younger than the 3 days
+# (macOS dirhelper) or 10 days (tmpfiles) after which the OS temp cleaner may delete files under
+# TMPDIR. A 2020 stamp let that cleaner delete fixture files mid-run (reports/osrc-fx-disk-r3.md).
+AGED="$(t=$(( $(date +%s) - 10800 )); date -r "$t" +%Y%m%d%H%M.%S 2>/dev/null || date -d "@$t" +%Y%m%d%H%M.%S)"
+age() { find "$@" -exec touch -t "$AGED" {} + 2>/dev/null; }
 manifest() { jq -cn --arg p "$1" --arg k "$2" --arg s "$3" --arg r "$4" --argjson t "$(date +%s)" \
   '{path:$p,kind:$k,session:$s,repo:$r,ts:$t}' >> "$OSRC_HOME/created.jsonl"; }
 pstat() { ps -o stat= -p "$1" 2>/dev/null | tr -d '[:space:]'; }
@@ -54,6 +58,18 @@ osrc() {
 settings() { mkdir -p "$1/disk-policy"; printf 'OSRC_DISK_MIN_GB=10\nOSRC_DISK_PAUSE_GB=4\nOSRC_DISK_CRITICAL_GB=1\n%s' "${2:-}" > "$1/disk-policy/settings"; }
 owner_pid() { cut -d'|' -f1 "$1/disk-policy/monitor.lock/owner" 2>/dev/null; }
 wait_for() { local i=0; while [ "$i" -lt "${2:-50}" ]; do eval "$1" && return 0; sleep 0.2; i=$((i+1)); done; return 1; }
+# Monitors are detached (not our children): TERM each lock owner and poll until it is gone, so no
+# block's monitor keeps ticking into the next block.
+stop_monitors() {
+  local f p i
+  for f in "$TMP"/*/disk-policy/monitor.lock/owner; do
+    [ -f "$f" ] || continue; p="$(cut -d'|' -f1 "$f")"; case "$p" in ''|*[!0-9]*) continue ;; esac
+    kill "$p" 2>/dev/null; i=0; while kill -0 "$p" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+    kill -9 "$p" 2>/dev/null
+  done
+}
+live_monitors() { local f p; for f in "$TMP"/*/disk-policy/monitor.lock/owner; do [ -f "$f" ] || continue; p="$(cut -d'|' -f1 "$f")"; kill -0 "$p" 2>/dev/null && printf '%s ' "$f"; done; }
+block() { stop_monitors; echo "=== $1 ==="; }
 
 echo "=== floors and settings ==="
 fl="$(osrc "$TMP/f1" '_osrc_disk_floors_kb')"; set -- $fl
@@ -82,8 +98,8 @@ mkdir -p "$TMP/small/jobs"; setfree 7340032
 g="$(osrc "$TMP/small" '_osrc_disk_vol_kb() { echo 8388608; }; _osrc_disk_gate; echo gate-rc=$?')"
 grep -q 'gate-rc=0' <<<"$g" && ok "empty small volume is not blocked by the default" || bad "small volume blocked: $g"
 
-echo "=== incident 1: gate, ack and override ==="
-GH="$TMP/gate"; export OSRC_HOME="$GH"; mkdir -p "$GH/jobs" "$TMP/outside-gate"
+block "incident 1: gate, ack and override"
+GH="$TMP/gate"; export OSRC_HOME="$GH"; mkdir -p "$GH/jobs" "$TMP/outside-gate"; settings "$GH"
 manifest "$TMP/outside-gate" job gate-sess ""
 OSRC_HOME="$GH" bash "$SRC" cleanup --ack >/dev/null 2>&1
 [ -f "$GH/cleanup/ask-ack" ] && ok "--ack wrote ask-ack" || bad "--ack did not write ask-ack"
@@ -142,7 +158,7 @@ grep -q 'write-rc=1' <<<"$g" && ok "real state writer returns failure after a wr
 # disk; a stale ack after a failed write is refused (tests/test_cleanup_manifest.sh, issue 86 section).
 grep -q 'gate-rc=0' <<<"$g" && ok "failed state write: the live scan and a current ack decide" || bad "gate refused a current ack on a failed write: $g"
 
-echo "=== P1: the override reaches a real bg job ==="
+block "P1: the override reaches a real bg job"
 # Floors put this host's real free space in the band (above a 1GB critical, under a huge
 # launch floor); pausing is off so the monitor leaves the job alone.
 BH="$TMP/bgh"; mkdir -p "$BH/jobs" "$TMP/bin" "$TMP/work"
@@ -163,7 +179,7 @@ if [ -n "$code" ]; then
   grep -q '_OSRC_DISK_ADMIT\|OSRC_DISK_OK' "$BH/jobs/$jid/out.log" 2>/dev/null && bad "override leaked to the delegate" || ok "delegate output carries no override"
 else bad "bg refusal printed no code: $g"; fi
 
-echo "=== incident 2: pause, hold, resume ==="
+block "incident 2: pause, hold, resume"
 JH="$TMP/jobs"; mkdir -p "$JH/jobs"
 settings "$JH"   # launch 10GB, pause 4GB, critical 1GB, resume 7GB
 mkjob() { # <name> <pid> <pgid> <sup_pid> -> job dir with verified identities
@@ -231,7 +247,7 @@ setfree 8388608
 osrc "$TMP/many" 'set -o pipefail; _osrc_disk_record_sweep() { :; }; _osrc_disk_monitor_tick' >/dev/null
 [ -z "$(ls "$TMP"/many/jobs/*/disk-paused 2>/dev/null)" ] && ok "recovery sweeps every record under pipefail" || bad "records left under pipefail"
 
-echo "=== P1: watchdog clocks skip disk-paused time (real _supervise) ==="
+block "P1: watchdog clocks skip disk-paused time (real _supervise)"
 WH="$TMP/wd"; WJ="$WH/jobs/job-w"; mkdir -p "$WJ"; settings "$WH"
 OSRC_HOME="$WH" OSRC_POLL=1 OSRC_NOINIT_SECS=6 OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1
   _supervise "$1" 30 45 12 -- sleep 60 >/dev/null 2>&1' "$SRC" "$WJ" >/dev/null 2>&1 &
@@ -247,7 +263,7 @@ st="$(cat "$WJ/status" 2>/dev/null)"
 wait_for 'case "$(cat "$WJ/status" 2>/dev/null)" in wedged|timeout) true ;; *) false ;; esac' 75 \
   && ok "watchdog still enforces its deadlines on active time: $(cat "$WJ/reason" 2>/dev/null)" || bad "watchdog never fired: $(cat "$WJ/status")"
 
-echo "=== foreground and tmux lanes ==="
+block "foreground and tmux lanes"
 FH="$TMP/fg"; mkdir -p "$FH/jobs"; settings "$FH"; setfree 20971520
 osrc "$FH" 'route_delegate() { _osrc_disk_gate fg; }; route_delegate; sleep 300 & echo $! > "$OSRC_HOME/child"; disown; sleep 3' >/dev/null &
 LP=$!; wait_for '[ -s "$FH/child" ]' 20; FC="$(cat "$FH/child" 2>/dev/null)"; KILL="$KILL $FC"
@@ -315,7 +331,7 @@ if command -v tmux >/dev/null 2>&1; then
   grep -q '"disk-parked-park"' "$TH/wake-queue.jsonl" 2>/dev/null && ok "parked lane: owner gets a disk-parked event" || bad "no parked event"
 else echo "SKIP: tmux not installed (TUI resume cases)"; fi
 
-echo "=== monitor lifecycle ==="
+block "monitor lifecycle"
 MH="$TMP/mon"; mkdir -p "$MH/jobs"; settings "$MH"
 sleep 300 & MJ=$!; KILL="$KILL $MJ"; disown "$MJ" 2>/dev/null
 MJD="$MH/jobs/job-m"; mkdir -p "$MJD"; echo running > "$MJD/status"; echo "$MJ" > "$MJD/pid"; lstart "$MJ" > "$MJD/pid_start"; : > "$MJD/out.log"
@@ -361,7 +377,7 @@ claim() { osrc "$LH" 'eval "$(declare -f _osrc_disk_lock_alive | sed "1s/_osrc_d
 w="$(claim "$LV")$(claim "$$")"; [ "$w" = won ] && [ "$(owner_pid "$LH")" = "$LV" ] && [ "$(ls -A "$LH/disk-policy/monitor.lock")" = owner ] \
   && ok "stale-lock race: one claimant wins, no debris" || bad "lock race: '$w' $(ls -RA "$LH/disk-policy")"
 # P1: a claim whose owner write failed (full disk) leaves an empty owner; it must not lock everyone out.
-LE="$TMP/lke"; mkdir -p "$LE/disk-policy/monitor.lock"; : > "$LE/disk-policy/monitor.lock/owner"; touch -t 202001010000 "$LE/disk-policy/monitor.lock/owner" "$LE/disk-policy/monitor.lock"
+LE="$TMP/lke"; mkdir -p "$LE/disk-policy/monitor.lock"; : > "$LE/disk-policy/monitor.lock/owner"; age "$LE/disk-policy/monitor.lock"
 sleep 300 & LW=$!; KILL="$KILL $LW"; disown "$LW" 2>/dev/null
 w="$(osrc "$LE" '_OSRC_DISK_ME='"$LW"'; _OSRC_DISK_ME_ID="$(_pid_start_identity '"$LW"')"; _osrc_disk_lock_take && echo won')"
 [ "$w" = won ] && [ "$(owner_pid "$LE")" = "$LW" ] && ok "empty owner file is dead: a new monitor claims the lock" || bad "empty owner locked out the monitor: '$w'"
@@ -370,7 +386,9 @@ BJ="$TMP/bank/jobs/j1"; mkdir -p "$BJ/disk-paused-secs"; printf 'since|%s\n' "$(
 osrc "$TMP/bank" '_osrc_disk_resume_rec "'"$BJ"'/disk-paused"' >/dev/null 2>&1
 grep -q '^since|' "$BJ/disk-paused" 2>/dev/null && ok "failed bank keeps the pause record and its since line" || bad "record dropped after a failed bank: job would be killed"
 
-echo "=== incident 3: merged-lane reclaim ==="
+kill $LV $LW 2>/dev/null   # the fake lock owners above
+block "incident 3: merged-lane reclaim"
+m="$(live_monitors)"; [ -z "$m" ] && ok "no disk monitor outlives its block" || bad "monitor still running: $m"
 RH="$TMP/reclaim"; mkdir -p "$RH/jobs"; export OSRC_HOME="$RH"
 R="$TMP/repo"; mkrepo "$R"
 git -C "$R" update-ref refs/remotes/origin/main HEAD   # main pushed: a remote holds merged lanes' commits
@@ -400,7 +418,7 @@ settings "$RH" 'OSRC_DISK_RECLAIM_MAX=0
 '
 n="$(OSRC_DISK_RECLAIM_MAX=10 osrc "$RH" '_osrc_disk_reclaim')"
 [ "$n" = 0 ] && [ -d "$R/.outsourcerer/worktrees/gone" ] && ok "RECLAIM_MAX=0 in settings disables reclaim; env cannot re-enable it" || bad "max=0: $n"
-rm -f "$RH/disk-policy/settings"
+settings "$RH"   # explicit floors again (reclaim on), never the host's real disk
 # P1: a branch that moves just before deletion is kept (conditional ref delete).
 n="$(osrc "$RH" '_osrc_branch_checked_out() { [ "${FUNCNAME[1]}" = _osrc_disk_reclaim_lane ] && [ "$2" = outsourcerer/race ] && git -C "$1" update-ref refs/heads/outsourcerer/race "$(git -C "$1" commit-tree -p refs/heads/outsourcerer/race -m moved "refs/heads/outsourcerer/race^{tree}")"; return 1; }
   _osrc_disk_reclaim')"
@@ -414,6 +432,9 @@ git -C "$R" cat-file -e "$FIX" 2>/dev/null && [ -d "$R/.outsourcerer/worktrees/d
 [ -d "$R/.git/worktrees/usb-wt" ] && ok "unrelated worktree's admin record not pruned" || bad "repository-wide prune ran"
 grep -q 'removed-branch.*outsourcerer/gone@' "$RH/cleanup.log" && grep -q 'removed-worktree' "$RH/cleanup.log" \
   && ok "deletions logged with the verified commit" || bad "cleanup.log: $(cat "$RH/cleanup.log" 2>/dev/null)"
+grep -q 'removing-worktree.*worktrees/gone' "$RH/cleanup.log" && ok "worktree removal logged before it ran" || bad "no pre-removal log line"
+grep -q 'worktrees/deps' "$RH/cleanup.log" && bad "deps worktree reached the removal step" || ok "ignored .env worktree never reached removal"
+[ -z "$(ls "$RH/disk-policy/monitor.lock" 2>/dev/null)" ] && [ -z "$(live_monitors)" ] && ok "no monitor ran during the reclaim checks" || bad "a monitor ran during incident 3: $(live_monitors)"
 
 echo ""
 echo "RESULTS: $pass passed, $fail failed"

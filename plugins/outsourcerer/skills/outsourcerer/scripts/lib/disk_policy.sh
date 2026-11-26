@@ -561,11 +561,10 @@ _osrc_disk_reclaim_lane() {
        || [ "$(git -C "$pp" rev-parse -q --verify HEAD 2>/dev/null)" != "$sha" ]; then
       _osrc_disk_log "kept $pp: live HEAD is not the receipt branch at the proven commit"; printf 0; return 0
     fi
-    if ! k="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || [ -n "$k" ]; then
-      _osrc_disk_log "kept $pp: untracked or ignored content (review: $0 cleanup)"; printf 0; return 0
-    fi
-    git -C "$repo" worktree remove "$pp" >/dev/null 2>&1 || { printf 0; return 0; }
-    _osrc_disk_cl_log removed-worktree "$pp"; n=$((n+1))
+    _osrc_wt_remove "$repo" "$pp" disk-policy; k=$?
+    [ "$k" = 2 ] && _osrc_disk_log "kept $pp: untracked or ignored content (review: $0 cleanup)"
+    [ "$k" = 0 ] || { printf 0; return 0; }
+    n=$((n+1))
   fi
   if [ -n "$(printf '%s\n' "$items" | jq -r --arg s "$s" --arg b "$br" 'select(.session==$s and .kind=="branch" and .path==$b) | .path' 2>/dev/null)" ] \
      && ! _osrc_branch_checked_out "$repo" "$br" \

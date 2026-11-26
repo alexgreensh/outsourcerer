@@ -44,6 +44,29 @@ _osrc_cl_state() { printf '%s/cleanup/state.json' "$OSRC_HOME"; }
 _osrc_cl_ack() { printf '%s/cleanup/ask-ack' "$OSRC_HOME"; }
 _osrc_cl_log() { printf '%s/cleanup.log' "$OSRC_HOME"; }
 
+# _osrc_wt_remove <repo> <worktree> <who> [caches] -> 0 removed; 2 kept for content; 1 failed.
+# The one way cleanup and reclaim delete a worktree. `git worktree remove` (never --force) still
+# deletes IGNORED files, so the untracked and ignored list is re-read here, just before it. Any
+# entry keeps the worktree. With "caches" (typed `cleanup --apply`), files inside a top-level
+# node_modules/.venv/__pycache__ are allowed unless secret-shaped (.env*, keys). The removal is
+# logged before it runs (no log line, no removal) and its outcome after.
+_osrc_wt_remove() {
+  local st f b log; log="$(_osrc_cl_log)"
+  st="$(git -C "$2" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || return 2
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ "${4:-}" = caches ] || return 2
+    case "$f" in '!! node_modules/'?*|'!! .venv/'?*|'!! __pycache__/'?*) ;; *) return 2 ;; esac
+    b="${f##*/}"
+    case "$b" in .env|.env.*|.npmrc|.netrc|credentials|id_rsa|id_ed25519|id_ecdsa|*.pem|*.key|*.p12) return 2 ;; esac
+  done <<<"$st"
+  printf '%s\tremoving-worktree\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$2" 2>/dev/null >> "$log" || return 1
+  if git -C "$1" worktree remove "$2" >/dev/null 2>&1; then
+    printf '%s\tremoved-worktree\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$2" 2>/dev/null >> "$log"; return 0
+  fi
+  printf '%s\tFAILED-worktree\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" "$2" 2>/dev/null >> "$log"; return 1
+}
+
 # _osrc_free_kb -> available KB on the filesystem holding OSRC_HOME (df -P columns).
 _osrc_free_kb() {
   df -kP "$OSRC_HOME" 2>/dev/null | awk 'NR==2 {print $4}'
@@ -532,12 +555,10 @@ _osrc_cleanup_apply() {
     [ "$kind" != "branch" ] && pp="$(_osrc_realpath "$path" 2>/dev/null)"
     case "$kind" in
       worktree)
-        if git -C "$repo" worktree remove "$pp" 2>/dev/null; then
+        if _osrc_wt_remove "$repo" "$pp" cleanup caches; then
           git -C "$repo" worktree prune 2>/dev/null || true
-          printf '%s\tremoved-worktree\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pp" >> "$log"
           deleted=$((deleted+1))
         else
-          printf '%s\tFAILED-worktree\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pp" >> "$log"
           failed=$((failed+1))
         fi ;;
       branch)
