@@ -664,12 +664,17 @@ _osrc_bg_preflight_capture() {
 _osrc_event() {  # <kind> <target> <detail> <next> [src]
   local kind="$1" target="$2" detail="$3" next="$4" src="${5:-spend}"
   local ts; ts="$(date +%s 2>/dev/null || echo 0)"
-  local f="$OSRC_HOME/lanes/events.jsonl"
+  local f="$OSRC_HOME/lanes/events.jsonl" job="" owner=""
   _mkdir_private "$OSRC_HOME/lanes" >/dev/null 2>&1 || true
+  # Stamp who must hear it: a refusal inside a detached job (fanout member, bg child) names its job
+  # and the session that owns that job, so supervise replays it (it keeps owned rows; live-test F7).
+  case "${OSRC_JOB_DIR:-}" in "$OSRC_HOME/jobs/"*) job="${OSRC_JOB_DIR##*/}" ;; esac
+  [ -n "$job" ] && owner="$(_osrc_lane_owner_of "$job" 2>/dev/null)"
+  [ -n "$owner" ] || owner="$(_owner_sid 2>/dev/null)"
   if have jq; then
     jq -cn --argjson ts "$ts" --arg k "$kind" --arg t "$target" --arg d "$detail" \
-      --arg n "$next" --arg s "$src" \
-      '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$s}' >> "$f" 2>/dev/null || true
+      --arg n "$next" --arg s "$src" --arg j "$job" --arg o "$owner" \
+      '{ts:$ts,kind:$k,target:$t,detail:$d,next:$n,src:$s} + (if $j == "" then {} else {job:$j} end) + (if $o == "" then {} else {owner:$o} end)' >> "$f" 2>/dev/null || true
   else
     # jq-less fallback: single-line JSON with quotes/backslashes stripped from detail.
     local d1; d1="$(printf '%s' "$detail" | tr '\n"\\' '   ' | cut -c1-300)"

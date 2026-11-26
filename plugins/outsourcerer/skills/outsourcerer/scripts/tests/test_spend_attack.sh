@@ -259,6 +259,18 @@ if wait_log 'swe-1-7-max --respect' && [ "$rc" -eq 0 ]; then
   if grep -q 'tui-input' "$LOG"; then bad "model:bare session model drove the picker with no consent (choice unknown)"
   else case "$out" in *"spend gate"*) ok "model:bare session model (unknown pick) asks first" ;;
     *) bad "model:bare no refusal (rc=$rc): $(printf '%s' "$out" | tail -2)" ;; esac; fi
+  # session send "/model X" drives the same picker: same gate, any case, leading blanks (live-test F3)
+  for txt in "/model swe-2-1-high" "  /MODEL swe-2-1-high"; do
+    : > "$LOG"; out="$(engine session send "$txt")"; rc=$?; sleep 1
+    if grep -qi 'tui-input.*/model' "$LOG"; then bad "send-model:'$txt' typed a paid switch into the pane with no consent"
+    else case "$out" in *"paid-lane:"*swe-2-1-high*"NEXT "*"session model swe-2-1-high"*) ok "send-model:'$txt' asks first, NEXT is session model" ;;
+      *) bad "send-model:'$txt' no refusal (rc=$rc): $(printf '%s' "$out" | tail -2)" ;; esac; fi
+  done
+  for txt in "/model" "/model swe-2-1-high please"; do
+    : > "$LOG"; out="$(engine session send "$txt")"; rc=$?; sleep 1
+    if [ "$rc" -ne 0 ] && ! grep -qi 'tui-input.*/model' "$LOG" && grep -q 'session model <name>' <<<"$out"; then ok "send-model:'$txt' (unknown pick) refused, names session model"
+    else bad "send-model:'$txt' rc=$rc out=$(printf '%s' "$out" | tail -1)"; fi
+  done
   sleep 1; : > "$LOG"
   out="$(engine session control relaunch)"; rc=$?
   sleep 1

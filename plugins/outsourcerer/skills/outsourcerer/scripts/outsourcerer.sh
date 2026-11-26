@@ -16841,7 +16841,7 @@ _winpty_session() {
       echo "To be woken when it needs you: after each session send, keep ONE '$0 supervise' running as a background command (it covers every run you own)."
       ;;
     send)
-      _winpty_cmd_send "$sdir" "$@"
+      _osrc_session_send_model_gate "$*"; _winpty_cmd_send "$sdir" "$@"
       ;;
     answer)
       _winpty_cmd_answer "$sdir" "$@"
@@ -17025,7 +17025,7 @@ session() {
     send)
       _session_parse_allow_effort "$@"; set -- "${_AE_ARGS[@]+"${_AE_ARGS[@]}"}"; [ -n "${1:-}" ] || die "session send needs text"
       tmux has-session -t "$SESSION_NAME" 2>/dev/null || die "no session '$SESSION_NAME' (run: $0 session start)"
-      _osrc_session_cap_send "$SESSION_NAME" "$*"   # Spend/cap add-on: no new work to a capped lane
+      _osrc_session_cap_send "$SESSION_NAME" "$*"; _osrc_session_send_model_gate "$*"   # cap + /model spend gate
       local _menu_kind _send_rc _st
       # Bug A: if the pane is showing an interactive choice menu (not a text composer), refuse
       # helpfully with the options + the answer command instead of typing into the menu. Typing
