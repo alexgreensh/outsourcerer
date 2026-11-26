@@ -5,8 +5,9 @@
 # hook (cmd_stop_guard) asks this first: when the session's card was last reported more than
 # OSRC_CARD_STALE_MIN minutes ago (default 30), or a question on it has waited more than
 # OSRC_DECISION_STALE_H hours (default 2) without being re-confirmed, the stop is blocked with the
-# exact `hub report` commands to run. A board track that names no model or lane is stale too: the
-# hover card is where the user reads who built it. Supervise turns the same check into an EVENT card
+# exact `hub report` commands to run. A board track that names no model or lane is stale too, and so is
+# one whose branch has a PR (GitHub cache) that it does not name: the hover card is where the user reads
+# who built it. A session that owns lanes and never reported is asked too (its card reads "never"). Supervise turns the same check into an EVENT card
 # on its 10-min tick, so an orchestrator that rarely ends a turn is still asked.
 # Loop safety: at most one block per OSRC_CARD_STALE_MIN window.
 # OSRC_CARD_GUARD=0 turns it off. Any error allows the stop.
@@ -16,10 +17,13 @@ _sg_iso_age() { # <iso-utc> -> seconds since, or empty
   [ -n "$t" ] && printf '%s' $(( $(date +%s) - t ))
 }
 
-# _sg_board_unnamed <project-json> -> the board tracks that name no model or no lane, comma-joined.
+# _sg_board_unnamed <project-json> -> the board tracks that name no model or no lane, or whose branch
+# has a known PR (lib/hub-lanemeta.sh) while they name no prs, comma-joined.
 _sg_board_unnamed() {
-  jq -r '[(.board.tasks // [])[]? | objects
-      | select(((.model // "") | tostring) == "" or ((.lane // "") | tostring) == "")
+  local h='{}'; type _osrc_hub_pr_heads >/dev/null 2>&1 && grep -q '"branch"' "$1" 2>/dev/null && h="$(_osrc_hub_pr_heads)"
+  jq -r --argjson h "$h" '[(.board.tasks // [])[]? | objects
+      | select(((.model // "") | tostring) == "" or ((.lane // "") | tostring) == ""
+          or (((.prs // "") | tostring) == "" and ((.branch // "") | type) == "string" and $h[.branch // ""] != null))
       | ((.short // .name // .id // "?") | tostring)[0:50]] | join(", ")' "$1" 2>/dev/null
 }
 
@@ -30,7 +34,12 @@ _sg_card_nag() {
   local sid="$1" pf="$OSRC_HOME/hub/projects/$1.json" df="$OSRC_HOME/hub/decisions/$1.json" sf="$OSRC_HOME/hub/status/$1.json"
   local smin="${OSRC_CARD_STALE_MIN:-30}" dh="${OSRC_DECISION_STALE_H:-2}" st name rep age="" mk mt old="" old_b="" n now
   case "$smin" in ''|*[!0-9]*) smin=30 ;; esac; case "$dh" in ''|*[!0-9]*) dh=2 ;; esac
-  [ -f "$pf" ] || [ -f "$df" ] || return 1
+  # A session that owns lanes and has no card is asked only where the caller allows it (_SG_CARD_OWNED=1:
+  # the stop guard once nothing more urgent blocks the stop, and supervise's card EVENT).
+  local owns=0 f
+  [ "${_SG_CARD_OWNED:-0}" = 1 ] && for f in "$OSRC_HOME/owners/$sid"/*; do
+    [ -f "$f" ] || continue; case "${f##*/}" in watch.*) continue ;; esac; owns=1; break; done
+  [ -f "$pf" ] || [ -f "$df" ] || [ "$owns" = 1 ] || return 1
   if [ -f "$pf" ] && ! jq -e 'type == "object"' "$pf" >/dev/null 2>&1; then return 1; fi
   if [ ! -L "$OSRC_HOME/hub/status" ] && [ -f "$sf" ] && [ ! -L "$sf" ]; then
     jq -e 'type == "object" and (.shippedBy == "user" or .status == "shipped")' "$sf" >/dev/null 2>&1 && return 1
@@ -53,7 +62,7 @@ _sg_card_nag() {
       | map("\(.id // "?") (\((.q // .short // "" | tostring)[0:60]))") | join(", ")' "$pf" 2>/dev/null)"
     [ -z "$old_b" ] || old="${old:+$old, }$old_b"
   fi
-  if [ ! -f "$pf" ] && [ -z "$old" ]; then return 1; fi
+  if [ ! -f "$pf" ] && [ -z "$old" ] && [ "$owns" = 0 ]; then return 1; fi
   local hasb; hasb="$(jq -r 'if (.board | type) == "object" and (.board.tasks | type) == "array" and (.board.tasks | length) > 0 then 1 else 0 end' "$pf" 2>/dev/null)"
   local unnamed=""; [ "$hasb" != 1 ] || unnamed="$(_sg_board_unnamed "$pf")"
   if [ -z "$old" ] && [ -z "$unnamed" ] && [ "$hasb" = 1 ] && [ -n "$age" ] && [ "$age" -lt $(( smin * 60 )) ]; then return 1; fi

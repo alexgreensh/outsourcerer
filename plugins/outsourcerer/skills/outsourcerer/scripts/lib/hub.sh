@@ -95,9 +95,6 @@ _osrc_hub_lane_status() {
   printf '%s|%s|%s' "$st" "$pct" "$extra"
 }
 
-# _osrc_hub_emit_lane <json-args...> -> prints one lane object (jq -cn).
-# All fields optional-empty are dropped by the caller-side jq merge.
-
 _osrc_hub_job_state() {
   local id="$1" jd="$OSRC_JOBS/$1" st rc
   st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null)"
@@ -120,7 +117,7 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   meta="$jd/meta.json"
   prov="$(jq -r '.provider // ""' "$meta" 2>/dev/null)"
   model="$(jq -r '.model // ""' "$meta" 2>/dev/null)"
-  lane="$(jq -r '.lane // .provider // ""' "$meta" 2>/dev/null)"
+  lane="$(jq -r '.lane // .provider // ""' "$meta" 2>/dev/null)"; _OSRC_LL=""; type _osrc_hub_lane_label >/dev/null 2>&1 && _osrc_hub_lane_label "$lane"
   verb="$(jq -r '.verb // ""' "$meta" 2>/dev/null)"
   wt="$(jq -r '.worktree // ""' "$meta" 2>/dev/null)"
   br="$(jq -r '.branch // ""' "$meta" 2>/dev/null)"
@@ -135,11 +132,11 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   local short="${task_ref:-}"
   [ -n "$short" ] || short="${lane:-$prov} ${verb:-run} ${id##*-}"
   jq -cn --arg id "$id" --arg short "$short" --arg status "$mstat" --arg pct "$mpct" \
-    --arg note "$note" --arg model "$model" --arg br "$br" --arg wt "$wt" \
+    --arg note "$note" --arg model "$model" --arg br "$br" --arg wt "$wt" --arg ll "${_OSRC_LL:-}" \
     '{id:$id, short:$short, status:$status}
      + (if $pct=="" then {} else {pct:($pct|tonumber)} end)
      + (if $note=="" then {} else {note:$note} end)
-     + (if $model=="" then {} else {model:$model} end)
+     + ({model:$model, lane:$ll} | with_entries(select(.value != "")))
      + (if $br=="" then {} else {branch:$br} end)
      + (if $wt=="" then {} else {worktree:$wt} end)'
 }
@@ -155,7 +152,8 @@ _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach targe
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.ols"
   ds=""; ds="$(_osrc_hub_done_state "$id")"; [ "$ds" = "done" ] && st="done"
   case "$st" in gone) return 1 ;; esac
-  model="$(type _session_registry_last_event >/dev/null 2>&1 && _session_registry_last_event "$id" 2>/dev/null | jq -r '.resolved_model // .model // ""' 2>/dev/null)"
+  model="$(type _session_registry_last_event >/dev/null 2>&1 && _session_registry_last_event "$id" 2>/dev/null | jq -r '"\(.provider // "")\u001f\(.resolved_model // .model // "")"' 2>/dev/null)"
+  _OSRC_LL=""; [ -z "${model%%$'\037'*}" ] || ! type _osrc_hub_lane_label >/dev/null 2>&1 || _osrc_hub_lane_label "${model%%$'\037'*}"; model="${model#*$'\037'}"
   local note=""
   if [ -s "$OSRC_HOME/autodetach/$id.rc" ]; then note="auto-detached run finished (rc $(cat "$OSRC_HOME/autodetach/$id.rc" 2>/dev/null | tr -dc '0-9'))"
   elif [ -f "$OSRC_HOME/autodetach/$id.log" ]; then note="auto-detached run"
@@ -165,15 +163,15 @@ _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach targe
   note="$(_osrc_hub_note "$note")"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.jq0"
   jq -cn --arg id "$id" --arg short "$id" --arg status "$mstat" --arg pct "$mpct" \
-    --arg note "$note" --arg model "$model" --arg sess "$id" \
+    --arg note "$note" --arg model "$model" --arg sess "$id" --arg ll "${_OSRC_LL:-}" \
     '{id:$id, short:$short, status:$status, session:$sess}
      + (if $pct=="" then {} else {pct:($pct|tonumber)} end)
      + (if $note=="" then {} else {note:$note} end)
-     + (if $model=="" then {} else {model:$model} end)'
+     + ({model:$model, lane:$ll} | with_entries(select(.value != "")))'
 }
 
 _osrc_hub_lane_remote() { # <id> -> lane json or nothing
-  local id="$1" f="$OSRC_HOME/remote/$id.json"
+  local id="$1" f; f="$OSRC_HOME/remote/$1.json"
   [ -f "$f" ] || return 1
   have jq || return 1
   local st branch head head7 msg repo rv mapped mstat mpct note short
@@ -185,9 +183,10 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   fi
   case "$st" in gone) return 1 ;; esac
   # One jq for the five fields (was five). \037 separates; tabs/newlines become spaces as the note does.
-  local url
-  IFS=$'\037' read -r branch head msg repo url < <(jq -r 'def c: (if type == "string" then . else tojson end) | sub("\n+$"; "") | gsub("[\t\n]"; " ");
-    [(.branch // "" | c), (.head // "" | c), (.head_msg // "" | c), (.repo // "" | c), (.url // "" | c)] | join("\u001f")' "$f" 2>/dev/null)
+  local url veh model
+  IFS=$'\037' read -r branch head msg repo url veh model < <(jq -r 'def c: (if type == "string" then . else tojson end) | sub("\n+$"; "") | gsub("[\t\n\u001f]"; " ");
+    [(.branch // "" | c), (.head // "" | c), (.head_msg // "" | c), (.repo // "" | c), (.url // "" | c), (.vehicle // "" | c), (.model // "" | c)] | join("\u001f")' "$f" 2>/dev/null)
+  _OSRC_LL=""; type _osrc_hub_lane_label >/dev/null 2>&1 && _osrc_hub_lane_label remote "$veh"
   head7="${head:0:7}"; msg="$(_osrc_hub_note "$msg")"
   repo="$(_osrc_hub_repo_name "$repo" "$url")"
   # Verdict from the review queue when present; ready+verdict refines the state.
@@ -202,10 +201,11 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   mstat="${mapped%%|*}"; mapped="${mapped#*|}"; mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
   jq -cn --arg id "$id" --arg short "$id" --arg status "$mstat" --arg pct "$mpct" \
-    --arg note "$note" --arg br "$branch" --arg repo "$repo" \
+    --arg note "$note" --arg br "$branch" --arg repo "$repo" --arg ll "${_OSRC_LL:-}" --arg model "$model" \
     '{id:$id, short:$short, status:$status}
      + (if $pct=="" then {} else {pct:($pct|tonumber)} end)
      + (if $note=="" then {} else {note:$note} end)
+     + ({model:$model, lane:$ll} | with_entries(select(.value != "")))
      + (if $br=="" then {} else {branch:$br} end)
      + (if $repo=="" then {} else {repo:$repo} end)'
 }
@@ -281,12 +281,12 @@ _osrc_hub_card() {
 }
 
 # _osrc_hub_apply_lane_overrides <lanes-json> <card-json> -> lanes with card.lanes overrides
-# merged (only short/note/issues/theme may be overridden; status/pct/session stay computed).
+# merged (only short/note/issues/prs/theme may be overridden; status/pct/session stay computed).
 _osrc_hub_apply_lane_overrides() {
   jq -c --argjson card "$2" '
     ($card.lanes // {}) as $ov |
     map(. as $l | ($ov[$l.id] // {}) as $o |
-      $l + ($o | with_entries(select(.key as $k | ["short","note","issues","theme"] | index($k) != null))))' \
+      $l + ($o | with_entries(select(.key as $k | ["short","note","issues","prs","theme"] | index($k) != null))))' \
     <<<"$1" 2>/dev/null || printf '%s' "$1"
 }
 
@@ -341,6 +341,7 @@ _osrc_hub_build_project() {
   decs="$(_osrc_hub_decisions "$slug")"
   card="$(_osrc_hub_card "$slug")"
   lanes="$(_osrc_hub_apply_lane_overrides "$lanes" "$card")"
+  ! type _osrc_hub_lanes_prs >/dev/null 2>&1 || lanes="$(_osrc_hub_lanes_prs "$lanes" "$(_osrc_hub_gh_slug "$(jq -r '.repo // ""' <<<"$card" 2>/dev/null)" 2>/dev/null)")"   # lib/hub-lanemeta.sh
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.card"
   # name: card > decisions-file already folded into card; fallback slug.
   local name
@@ -961,7 +962,7 @@ cmd_hub_mc() {
   # A live hub is reused only when it runs THIS engine: an older install's server (or another
   # checkout's) answers the token probe and keeps serving old code and old bugs (0.17.5).
   # _osrc_mc_stale_hub kills only a process verified as this OSRC_HOME's hub server.
-  [ -n "$url" ] && type _osrc_mc_stale_hub >/dev/null 2>&1 && _osrc_mc_stale_hub "$p" && url=""
+  type _osrc_mc_hub_reuse >/dev/null 2>&1 && { _osrc_mc_hub_reuse "${url:+$p}" || url=""; }   # also stops a wedged hub of ours (lib/mc_alive.sh)
   if [ -z "$url" ]; then
     mkdir -p "$OSRC_HOME/hub" && chmod 700 "$OSRC_HOME/hub" 2>/dev/null
     [ -L "$log" ] && die "mc: $log is a symlink, refusing to write it"

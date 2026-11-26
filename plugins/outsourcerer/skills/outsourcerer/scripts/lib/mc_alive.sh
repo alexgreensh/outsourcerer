@@ -26,7 +26,9 @@ osrc_mc_cmd_hook() { # <cmd> [args...]
       [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && type osrc_watcher_warn >/dev/null 2>&1 && osrc_watcher_warn ;;
   esac
   case "$cmd:$sub" in
-    session:start|run:*|explore:*|research:*|edit:*|yolo:*|bg:*|fanout:*|fleet:*) osrc_mc_auto_open ;;
+    session:start|run:*|explore:*|research:*|edit:*|yolo:*|bg:*|fanout:*|fleet:*) osrc_mc_auto_open
+      # An orchestrator launching lanes with no standing watcher is told once, with the install command.
+      [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] && type osrc_watcher_hint >/dev/null 2>&1 && osrc_watcher_hint "$(_owner_sid 2>/dev/null)" >&2 ;;
   esac
   return 0
 }
@@ -62,14 +64,57 @@ _osrc_mc_open_url() {
   python3 -I -c 'import sys, webbrowser; webbrowser.open(sys.argv[1])' "$1" >/dev/null 2>&1
 }
 
-# _osrc_mc_hub_live -> "<pid> <port>" of the hub serving this OSRC_HOME, rc 1 when none.
+# ---- the one hub-liveness rule ------------------------------------------------------------------
+# _osrc_mc_hub_ours <pid> [cmd] -> 0 when <pid> runs hub_server.py for THIS OSRC_HOME (argv is the truth).
+# Without `ps -o` (Git Bash) a live pid is all there is to go on.
+_osrc_mc_hub_ours() {
+  local cmd="${2:-}" oh
+  kill -0 "$1" 2>/dev/null || return 1
+  [ -n "$cmd" ] || cmd="$(ps -p "$1" -ww -o command= 2>/dev/null)" || return 0
+  [ -n "$cmd" ] || return 0
+  case "$cmd" in *hub_server.py*) ;; *) return 1 ;; esac
+  case "$cmd" in *--osrc-home=*) oh="${cmd#*--osrc-home=}" ;; *--osrc-home\ *) oh="${cmd#*--osrc-home }" ;; *) return 1 ;; esac
+  [ "${oh%% --*}" = "$OSRC_HOME" ]
+}
+# _osrc_mc_hub_live -> "<pid> <port>" of the hub serving this OSRC_HOME, rc 1 when none: serve.json names
+# a pid that is alive AND is our hub server (a recycled pid after a crash is not). Every opener and `mc`
+# ask this; a hub that is live but runs older code is replaced by _osrc_mc_stale_hub (_osrc_mc_hub_current).
 _osrc_mc_hub_live() {
   local f pid port; f="$(_osrc_mc_dir)/serve.json"
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  pid="$(jq -r '.pid // empty' "$f" 2>/dev/null)"; port="$(jq -r '.port // empty' "$f" 2>/dev/null)"
+  IFS='|' read -r pid port < <(jq -r '"\(.pid // "")|\(.port // "")"' "$f" 2>/dev/null)
   case "$pid:$port" in *[!0-9:]*|:*|*:) return 1 ;; esac
-  kill -0 "$pid" 2>/dev/null || return 1
+  _osrc_mc_hub_ours "$pid" || return 1
   printf '%s %s\n' "$pid" "$port"
+}
+# _osrc_mc_hub_current -> "<pid> <port>" of a live hub of ours running THIS engine's code; a live hub on
+# older code is stopped (verified) and rc 1 returned, so the caller starts a fresh one.
+_osrc_mc_hub_current() {
+  local live; live="$(_osrc_mc_hub_live)" || return 1
+  _osrc_mc_stale_hub "${live##* }" && return 1
+  printf '%s\n' "$live"
+}
+# _osrc_mc_stop_hub <pid>: stop a VERIFIED hub of ours, also a wedged one (SIGSTOP): CONT, TERM, then KILL,
+# each bounded, and drop its serve.json. rc 1 when it could not be signalled.
+_osrc_mc_stop_hub() {
+  local pid="$1" i f; f="$(_osrc_mc_dir)/serve.json"
+  kill -CONT "$pid" 2>/dev/null; kill "$pid" 2>/dev/null || return 1
+  for i in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+  # After SIGKILL, wait (bounded) until it is gone: the fresh hub binds the same port, and a dying
+  # process still holding it makes a strict --port bind fail.
+  kill -0 "$pid" 2>/dev/null && { kill -9 "$pid" 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done; }
+  [ -f "$f" ] && [ "$(jq -r '.pid // ""' "$f" 2>/dev/null)" = "$pid" ] && rm -f "$f" 2>/dev/null
+  return 0
+}
+# _osrc_mc_hub_reuse [port]: `mc`'s decision after its token probe. With the port that answered: reuse it
+# (rc 0) unless it runs older code (stopped, rc 1). With none (no answer): a live hub of ours that did not
+# answer is wedged, so it is stopped first (a new one would only hit "address in use"); rc 1.
+_osrc_mc_hub_reuse() {
+  local live
+  if [ -n "${1:-}" ]; then _osrc_mc_stale_hub "$1" && return 1; return 0; fi
+  live="$(_osrc_mc_hub_live)" || return 1
+  printf '[outsourcerer] Mission Control (pid %s) did not answer; restarting it\n' "${live%% *}" >&2
+  _osrc_mc_stop_hub "${live%% *}"; return 1
 }
 # _osrc_mc_etime_to_epoch <etime> -> epoch the process started, rc 1 on unparseable input.
 # `ps -o etime` prints [[dd-]hh:]mm:ss.
@@ -91,7 +136,7 @@ _osrc_mc_etime_to_epoch() {
 # argv must be hub_server.py with --osrc-home = this OSRC_HOME. A pid that cannot be verified
 # as OUR hub is never touched; a hub that cannot be proven stale is left serving (rc 1).
 _osrc_mc_stale_hub() {
-  local p="${1:-}" f sp spid pid cand cmd eng eng_rp cur_rp sver mt start stale="" i oh lpid
+  local p="${1:-}" f sp spid pid cand cmd eng eng_rp cur_rp sver mt start stale="" lpid
   case "$p" in ''|*[!0-9]*) return 1 ;; esac
   f="$(_osrc_mc_dir)/serve.json"; sp=""; spid=""
   if [ -f "$f" ] && [ ! -L "$f" ]; then
@@ -108,16 +153,8 @@ _osrc_mc_stale_hub() {
   fi
   pid=""
   for cand in $cands; do
-    kill -0 "$cand" 2>/dev/null || continue
     cmd="$(ps -p "$cand" -ww -o command= 2>/dev/null)"
-    case "$cmd" in *hub_server.py*) ;; *) continue ;; esac
-    oh=""
-    case "$cmd" in
-      *--osrc-home=*) oh="${cmd#*--osrc-home=}" ;;
-      *--osrc-home\ *) oh="${cmd#*--osrc-home }" ;;
-    esac
-    oh="${oh%% --*}"
-    [ "$oh" = "$OSRC_HOME" ] || continue
+    [ -n "$cmd" ] && _osrc_mc_hub_ours "$cand" "$cmd" || continue   # never touch what is not provably ours
     pid="$cand"; break
   done
   [ -n "$pid" ] || return 1
@@ -149,12 +186,7 @@ _osrc_mc_stale_hub() {
   [ -n "$stale" ] || return 1
   # Verified stale OUR hub: stop it and drop the stale record so a fresh server (same
   # 8788-8798 scan) can take its place; it usually reclaims the same bookmarked port.
-  kill "$pid" 2>/dev/null || return 1
-  for i in 1 2 3 4 5 6 7 8; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-  # After SIGKILL, wait (bounded) until it is gone: the fresh hub binds the same port, and a dying
-  # process still holding it makes a strict --port bind fail.
-  kill -0 "$pid" 2>/dev/null && { kill -9 "$pid" 2>/dev/null; for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done; }
-  [ -n "$f" ] && [ -f "$f" ] && [ "$sp" = "$p" ] && [ "$spid" = "$pid" ] && rm -f "$f" 2>/dev/null
+  _osrc_mc_stop_hub "$pid" || return 1
   printf '[outsourcerer] restarted Mission Control: the running hub was built from older code\n' >&2
   return 0
 }
@@ -173,7 +205,7 @@ osrc_mc_auto_open() {
   _osrc_mc_tab_recent && return 0
   _osrc_mc_real_home || return 0
   local live d m; d="$(_osrc_mc_dir)"
-  if live="$(_osrc_mc_hub_live)"; then
+  if live="$(_osrc_mc_hub_current)"; then   # ours, alive, this engine's code; an old-code hub was stopped
     m="$d/opened.${live%% *}"
     ( set -C; : > "$m" ) 2>/dev/null || return 0   # once per hub process
     local tok; tok="$(tr -d ' \n' < "$d/token" 2>/dev/null)"
@@ -241,9 +273,6 @@ osrc_mc_alerts() {
 # serve.json before it prints its URL, so a URL with no matching record came from a stale serve.log
 # (a dead hub's line), and `mc` must keep waiting instead of reporting a server that is not up.
 _osrc_mc_url_live() {
-  local sp port pid
-  sp="$(jq -r '"\(.port // "")|\(.pid // "")"' "$(_osrc_mc_dir)/serve.json" 2>/dev/null)" || return 1
-  port="${sp%%|*}"; pid="${sp#*|}"
-  case "$port$pid" in ''|*[!0-9]*) return 1 ;; esac
-  case "${1:-}" in "http://127.0.0.1:$port/"*) kill -0 "$pid" 2>/dev/null ;; *) return 1 ;; esac
+  local live; live="$(_osrc_mc_hub_live)" || return 1
+  case "${1:-}" in "http://127.0.0.1:${live##* }/"*) return 0 ;; *) return 1 ;; esac
 }

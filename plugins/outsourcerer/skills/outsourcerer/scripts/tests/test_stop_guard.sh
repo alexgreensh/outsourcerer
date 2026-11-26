@@ -5,6 +5,7 @@
 # sessions, loop safety, cleanup, the off switch, and the plugin hook wiring.
 # Run: bash test_stop_guard.sh
 set -uo pipefail
+export OSRC_CARD_GUARD=0   # waiter logic only: a card-less owner is otherwise asked for its Mission Control card (lib/card_fresh.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 HOOKS="$SCRIPT_DIR/../../../../hooks/hooks.json"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }

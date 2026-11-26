@@ -15,6 +15,7 @@ osrc_test_sandbox || { echo "FAIL: sandbox" >&2; exit 1; }
 # OSRC_TEST_SRC=<scripts dir> runs this suite against another checkout (the red run on base).
 # Run: nice -n 19 bash test_supervise_lifecycle.sh
 set -uo pipefail
+export OSRC_CARD_GUARD=0   # waiter logic only: a card-less owner is otherwise asked for its Mission Control card (lib/card_fresh.sh)
 HERE="$(cd "$(dirname "$0")" && pwd)"; SD="${OSRC_TEST_SRC:-$HERE/..}"; SRC="$SD/outsourcerer.sh"; FX="$HERE/fixtures/supervise"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }

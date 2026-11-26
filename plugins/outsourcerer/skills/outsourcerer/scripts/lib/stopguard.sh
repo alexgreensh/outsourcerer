@@ -99,6 +99,10 @@ _waited_ids() { # only a process that IS an outsourcerer wait counts, never a li
   _sg_ps_waits
 }
 
+# A watched session that owns lanes but never reported a card is asked for one (lib/card_fresh.sh);
+# only here, once no waiter is missing, so the waiter block always comes first.
+_sg_card_owned() { local r; type _sg_card_nag >/dev/null 2>&1 && r="$(_SG_CARD_OWNED=1 _sg_card_nag "$1")" && jq -cn --arg r "$r" '{decision:"block", reason:$r}'; return 0; }
+
 cmd_stop_guard() {
   [ "${OSRC_STOP_GUARD:-1}" = "0" ] && return 0
   have jq || return 0
@@ -144,12 +148,12 @@ cmd_stop_guard() {
   need="${need# }${idle}"
   if osrc_session_watched "$sid"; then   # the one "is this session watched" rule (lib/stall.sh)
     rm -f "$dir/.stop-blocks" "$dir/.unguarded" 2>/dev/null
-    return 0
+    _sg_card_owned "$sid"; return 0
   fi
   waited="$(_waited_ids "$sid" 2>/dev/null)"
   for id in $need; do printf '%s\n' "$waited" | grep -qxF "$id" || unwaited="$unwaited $id"; done
   unwaited="${unwaited# }"
-  [ -n "$unwaited" ] || return 0
+  [ -n "$unwaited" ] || { _sg_card_owned "$sid"; return 0; }
   # Loop safety: count consecutive blocks for this exact set.
   key="$(printf '%s' "$unwaited" | cksum | awk '{print $1}')"
   cnt="$(awk -v k="$key" '$1==k{print $2}' "$dir/.stop-blocks" 2>/dev/null)"; cnt="${cnt:-0}"
@@ -165,7 +169,9 @@ cmd_stop_guard() {
   printf '%s %s\n' "$key" "$((cnt + 1))" > "$dir/.stop-blocks" 2>/dev/null
   n="$(printf '%s\n' $unwaited | grep -c .)"
   reason="$(printf 'Outsourcerer: %s delegate(s) you own still need you (%s), and nothing will wake you when they do. Before ending your turn, start ONE background command (Bash with run_in_background: true):\n  %s supervise --session %s' "$n" "$unwaited" "$SCRIPT_PATH" "$sid")"
-  reason="$reason$(printf '\nIt returns with EVENT/NEXT lines the moment any of them is blocked, asks a question, finishes, or stalls. Run each NEXT, then arm supervise again. Tell the user what is running.\nTo stop re-arming for good, ask the user to run Claude Code inside tmux and, once: %s watcher install' "$SCRIPT_PATH")"
+  reason="$reason$(printf '\nIt returns with EVENT/NEXT lines the moment any of them is blocked, asks a question, finishes, or stalls. Run each NEXT, then arm supervise again. Tell the user what is running.')"
+  local hint; hint="$(type osrc_watcher_hint >/dev/null 2>&1 && osrc_watcher_hint "$sid")" && reason="$reason
+$hint (it wakes this session when Claude Code runs inside tmux)"
   jq -cn --arg r "$reason" '{decision:"block", reason:$r}'
   return 0
 }

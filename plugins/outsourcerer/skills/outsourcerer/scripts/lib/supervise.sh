@@ -554,8 +554,8 @@ _sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits a
 }
 
 _sv_card_event() { # <owner sid>: the stop-guard card check (lib/card_fresh.sh), as a wake for orchestrators that rarely stop
-  local why; type _sg_card_nag >/dev/null 2>&1 && [ -f "$OSRC_HOME/hub/projects/$1.json" ] || return 0
-  why="$(_sg_card_nag "$1")" || return 0
+  local why; type _sg_card_nag >/dev/null 2>&1 || return 0   # it decides: a card, or lanes owned with none
+  why="$(_SG_CARD_OWNED=1 _sg_card_nag "$1")" || return 0
   _sv_append card card "$(printf '%s' "$why" | head -1 | cut -c1-400)" "$SCRIPT_PATH hub report --board <board.json> --next \"<one line>\"" supervise "$1"
 }
 

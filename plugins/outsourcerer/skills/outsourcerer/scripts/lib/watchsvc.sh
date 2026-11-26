@@ -24,9 +24,14 @@
 # desktop app cannot be typed into from outside; for it the watcher only observes and notifies, and
 # the stop guard keeps asking for `supervise` instead of counting the watcher as a waiter.
 # Backends: launchd (macOS), systemd --user (Linux), else a detached loop that any outsourcerer call
-# restarts while installed (Windows Git Bash, containers). The unit runs watchsvc/launch, which every
-# call repoints at the current plugin copy. `install` is explicit and idempotent; `uninstall` removes
-# every backend's unit and all watcher state. Nothing else ever starts the watcher.
+# restarts while installed (Windows Git Bash, containers). The unit runs watchsvc/launch, which follows
+# plugin updates (a copy under ~/.claude/plugins/) and the copy `install` ran from, never a dev checkout
+# or a delegate's worktree. The unit is named per OSRC_HOME, so a sandboxed home never touches the
+# account's own watcher. `install` is explicit and idempotent; `uninstall` removes every backend's unit
+# and all watcher state. Nothing else ever starts the watcher: a session that launches lanes without
+# one is told once, with the install command (osrc_watcher_hint). Resuming a lane after a provider
+# limit resets needs this installed watcher; a per-session `supervise` reports the limit and leaves the
+# `continue` to the orchestrator.
 
 _ws_root() { printf '%s/watchsvc' "$OSRC_HOME"; }
 _ws_stale() { _sv_num "${OSRC_WATCH_STALE:-}" 360; }   # > tick timeout + interval, so a slow tick gets no rival
@@ -45,6 +50,10 @@ _ws_env() { # the daemon's settings are the ones captured at install, not whatev
 }
 
 # ---- the loop ------------------------------------------------------------------------------------
+# This loop still owns <lock>. A pid file missing for a moment is a breaker checking it (it puts a
+# live owner's back); a lock dir that is gone (uninstall) or names another pid is not ours.
+_ws_mine() { local p; p="$(cat "$1/pid" 2>/dev/null)"; [ "$p" = "$$" ] && return 0
+  [ -z "$p" ] && [ -d "$1" ] && { sleep 0.3; [ "$(cat "$1/pid" 2>/dev/null)" = "$$" ]; }; }
 _ws_run() {
   local iv tmo l
   _ws_env
@@ -54,9 +63,16 @@ _ws_run() {
     [ -n "$(_ws_daemon_pid)" ] && { echo "outsourcerer: watcher already running" >&2; return 0; }
     # a starter that has not published its pid yet keeps the lock for 10 s
     [ -f "$l/pid" ] || [ $(( $(_sv_now) - $(_sv_num "$(stat -c %Y "$l" 2>/dev/null || stat -f %m "$l" 2>/dev/null)" 0) )) -ge 10 ] || { echo "outsourcerer: watcher already starting" >&2; return 0; }
-    rm -rf "$l"; mkdir "$l" 2>/dev/null || return 0
+    # Break a dead owner atomically: only one breaker's rename of its pid file succeeds, and a live owner
+    # renamed by mistake gets it back. The lock dir itself is never removed here, so no breaker can delete
+    # a lock another one just claimed (a check-then-rm let several loops tick at once).
+    if mv "$l/pid" "$l/pid.stale.$$" 2>/dev/null; then
+      _ws_pid_ok "$(cat "$l/pid.stale.$$" 2>/dev/null)" && { mv "$l/pid.stale.$$" "$l/pid" 2>/dev/null; echo "outsourcerer: watcher already running" >&2; return 0; }
+      rm -f "$l/pid.stale.$$"
+    fi
   fi
-  printf '%s\n' "$$" > "$l/pid"; _sv_now > "$(_ws_root)/alive"   # known as alive from its first second (no `ps -o`)
+  ( set -C; printf '%s\n' "$$" > "$l/pid" ) 2>/dev/null || { echo "outsourcerer: watcher already starting" >&2; return 0; }   # O_EXCL: one owner
+  _sv_now > "$(_ws_root)/alive"   # known as alive from its first second (no `ps -o`)
   trap '_sv_bounded_kill; [ "$(cat "$(_ws_root)/run.lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$(_ws_root)/run.lock"' EXIT
   trap 'exit 0' INT TERM HUP
   iv="$(_sv_num "${OSRC_WATCH_INTERVAL:-}" 30)"; [ "$iv" -ge 1 ] || iv=30
@@ -64,7 +80,7 @@ _ws_run() {
   _ws_log "watcher run pid $$ every ${iv}s"
   # The lock is re-checked every pass: a loop whose lock was taken over (or removed by uninstall) exits.
   # One whose launcher now names another plugin copy re-runs itself from there, on every backend.
-  while [ -d "$OSRC_HOME" ] && [ "$(cat "$l/pid" 2>/dev/null)" = "$$" ] \
+  while [ -d "$OSRC_HOME" ] && _ws_mine "$l" \
         && { [ ! -f "$(_ws_root)/launch" ] || grep -qxF "# script: $SCRIPT_PATH" "$(_ws_root)/launch"; }; do
     _sv_bounded "$tmo" _ws_tick || _ws_log "tick failed or timed out (rc $?)"   # a hung probe never stops the loop
     sleep "$iv" & wait "$!" 2>/dev/null
@@ -295,18 +311,23 @@ _ws_limits() {
   printf '%s %s\n' "$size" "$gen" > "$d/.cursor"
   for f in "$d"/*; do
     [ -f "$f" ] || continue
-    t="${f##*/}"; case "$t" in *.done|*.try) continue ;; esac
+    t="${f##*/}"; case "$t" in *.done|*.try|*.sending) continue ;; esac
     ep="$(_sv_num "$(cat "$f")" 0)"
     _sv_state_read "$t"
     # Not owned any more (checked at send time), or moved on: not ours to continue.
-    { ls "$OSRC_HOME"/owners/*/"$t" >/dev/null 2>&1 && case "$SVS_LK" in limit:*) true ;; *) false ;; esac; } || { rm -f "$f" "$f.done" "$f.try"; continue; }
+    { ls "$OSRC_HOME"/owners/*/"$t" >/dev/null 2>&1 && case "$SVS_LK" in limit:*) true ;; *) false ;; esac; } || { rm -f "$f" "$f.done" "$f.try" "$f.sending"; continue; }
     [ "$now" -ge "$ep" ] || continue
     [ "$(cat "$f.done" 2>/dev/null)" = "$ep" ] && continue
     _ws_due "$f.try" || continue
+    # Claimed before the send (O_EXCL): two loops can never both send this `continue`. A claim left by a
+    # loop that died mid-send is let go after the tick timeout.
+    [ -f "$f.sending" ] && [ $(( now - $(_sv_num "$(stat -c %Y "$f.sending" 2>/dev/null || stat -f %m "$f.sending" 2>/dev/null)" "$now") )) -gt "$(_sv_num "${OSRC_WATCH_TICK_TIMEOUT:-}" 300)" ] && rm -f "$f.sending"
+    ( set -C; printf '%s\n' "$$" > "$f.sending" ) 2>/dev/null || continue
+    [ "$(cat "$f.done" 2>/dev/null)" = "$ep" ] && { rm -f "$f.sending"; continue; }   # another loop sent it meanwhile
     OUTSOURCERER_TMUX="$t" OSRC_STREAM=1 "$SCRIPT_PATH" session send "continue" >/dev/null 2>&1 </dev/null; rc=$?
     # rc 0 verified, rc 2 submitted but unverified (never resend: that would be a second continue).
-    case "$rc" in 0|2) ;; *) _ws_log "continue to $t after its limit reset failed (rc $rc; attempt $(_ws_backoff "$f.try")), retrying with backoff"; continue ;; esac
-    printf '%s\n' "$ep" > "$f.done"; rm -f "$f.try"
+    case "$rc" in 0|2) ;; *) rm -f "$f.sending"; _ws_log "continue to $t after its limit reset failed (rc $rc; attempt $(_ws_backoff "$f.try")), retrying with backoff"; continue ;; esac
+    printf '%s\n' "$ep" > "$f.done"; rm -f "$f.try" "$f.sending"
     _sv_append limit-resumed "$t" "sent one 'continue' after the provider limit reset (epoch $ep)$([ "$rc" = 2 ] && printf ', delivery not verified')" \
       "OUTSOURCERER_TMUX=$t $SCRIPT_PATH session read" watcher "$(basename "$(dirname "$(ls -1 "$OSRC_HOME"/owners/*/"$t" 2>/dev/null | head -1)")")"
   done
@@ -324,6 +345,18 @@ _ws_note_session() { # <sid> <cwd>: what a channel needs, recorded from inside t
 # The watcher reaches <sid>: a live, recently ticking loop with a channel judged by ITS settings.
 # A channel that keeps failing (.wakefail) is no waiter: the guard keeps the turn open instead.
 _ws_covers() { _ws_alive && [ -n "$(_ws_daemon_pid)" ] && [ ! -s "$OSRC_HOME/owners/$1/.wakefail" ] && ( unset TMUX TMUX_PANE TMUX_TMPDIR; _ws_env; _ws_channel "$1" >/dev/null 2>&1 ); }
+
+# ---- the one-line gap notice -----------------------------------------------------------------------
+# osrc_watcher_hint <sid> -> prints, ONCE per session, that no standing watcher is installed and the exact
+# command that installs one; rc 1 (nothing printed) when one is installed or this session was told.
+# Called by the launch hook (lib/mc_alive.sh) and the stop guard. Never installs anything itself.
+osrc_watcher_hint() {
+  local d="$OSRC_HOME/watcher-hint" sid="${1:-}"
+  case "$sid" in ''|.*|*/*) return 1 ;; esac
+  [ -f "$(_ws_root)/installed" ] && return 1
+  mkdir -p "$d" 2>/dev/null && ( set -C; : > "$d/$sid" ) 2>/dev/null || return 1
+  printf '[outsourcerer] no standing watcher is installed: these lanes are watched only while a supervise is armed, and nothing continues them after a plan limit resets. For one that never needs re-arming, ask the user to run, once (a per-user background service): %s watcher install\n' "$SCRIPT_PATH"
+}
 
 # ---- install -------------------------------------------------------------------------------------
 _ws_spawn() { # start the detached loop unless one runs; never blocks the caller
@@ -343,10 +376,26 @@ _ws_stop_loop() { local p i=0; p="$(_ws_daemon_pid)" || return 0
 _ws_launcher() {
   local l sp="$SCRIPT_PATH"; l="$(_ws_root)/launch"   # SCRIPT_PATH is absolute (outsourcerer.sh)
   grep -qxF "# script: $sp" "$l" 2>/dev/null && return 0
+  _ws_follows "$sp" || return 1
   printf '#!%s\n# script: %s\nexec %q %q watcher run\n' "$BASH" "$sp" "$BASH" "$sp" > "$l.tmp" && chmod +x "$l.tmp" && mv -f "$l.tmp" "$l"
 }
-_ws_refresh() { # any outsourcerer call: keep an INSTALLED watcher pointed at this copy, and its fallback loop alive
-  local be; be="$(cat "$(_ws_root)/installed" 2>/dev/null)" || return 0
+# The launcher may name only an installed copy: one under the Claude Code plugin dir (a plugin update), or
+# the copy `watcher install` ran from (watchsvc/pinned). A dev checkout or a delegate's worktree that runs
+# with the real OSRC_HOME must never become the code a user-level daemon runs (security F2).
+_ws_follows() { # <script-path>
+  case "$1" in */.outsourcerer/worktrees/*) return 1 ;; esac
+  [ "$1" = "$(cat "$(_ws_root)/pinned" 2>/dev/null)" ] && return 0
+  case "$1" in "$HOME"/.claude/plugins/*) return 0 ;; esac
+  return 1
+}
+_ws_refresh() { # any outsourcerer call: keep an INSTALLED watcher pointed at the installed copy, and its fallback loop alive
+  local be n; be="$(cat "$(_ws_root)/installed" 2>/dev/null)" || return 0
+  if ! grep -qxF "# script: $SCRIPT_PATH" "$(_ws_root)/launch" 2>/dev/null && ! _ws_follows "$SCRIPT_PATH"; then
+    n="$(_ws_root)/devnote"   # once per copy: this one is not installed, the watcher stays where it is
+    [ "$(cat "$n" 2>/dev/null)" = "$SCRIPT_PATH" ] || { printf '%s\n' "$SCRIPT_PATH" > "$n" 2>/dev/null
+      printf '[outsourcerer] the installed watcher keeps running %s; this copy is not an installed plugin, so it does not repoint it (run `watcher install` from here to switch)\n' \
+        "$(sed -n 's/^# script: //p' "$(_ws_root)/launch" 2>/dev/null)" >&2; }
+  fi
   _ws_launcher
   [ "$be" != fallback ] || _ws_spawn
   return 0
@@ -358,14 +407,25 @@ _ws_backend() {
   elif [ "${OSRC_PLATFORM:-}" = linux ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then printf systemd
   else printf fallback; fi
 }
-_ws_unit() { case "$1" in launchd) printf '%s/com.outsourcerer.watcher.plist' "${OSRC_WATCH_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}" ;;
-  systemd) printf '%s/outsourcerer-watcher.service' "${OSRC_WATCH_SYSTEMD_DIR:-$HOME/.config/systemd/user}" ;; esac; }
+# One unit per OSRC_HOME: launchd labels and systemd unit names are per account, not per HOME, so a
+# test or sandbox home with a fixed name would boot out (and replace) the account's own watcher. The
+# account's default home (<real home>/.outsourcerer) keeps the plain name; any other home gets a hash.
+_ws_name() { # -> com.outsourcerer.watcher[.<hash8>]
+  local h a; a="$(cd "$OSRC_HOME" 2>/dev/null && pwd -P || printf '%s' "$OSRC_HOME")"
+  h="$(python3 -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null)"
+  [ -n "$h" ] && h="$(cd "$h/.outsourcerer" 2>/dev/null && pwd -P || printf '%s' "$h/.outsourcerer")"
+  if [ -n "$h" ] && [ "$a" = "$h" ]; then printf 'com.outsourcerer.watcher'
+  else printf 'com.outsourcerer.watcher.%s' "$(printf '%s' "$a" | cksum | awk '{printf "%08x", $1}')"; fi
+}
+_ws_svc() { local n; n="$(_ws_name)"; n="${n#com.outsourcerer.watcher}"; printf 'outsourcerer-watcher%s.service' "${n:+-${n#.}}"; }
+_ws_unit() { case "$1" in launchd) printf '%s/%s.plist' "${OSRC_WATCH_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}" "$(_ws_name)" ;;
+  systemd) printf '%s/%s' "${OSRC_WATCH_SYSTEMD_DIR:-$HOME/.config/systemd/user}" "$(_ws_svc)" ;; esac; }
 _ws_unit_rm() { # <backend>: unload and delete its unit, if one is on disk
   local u; u="$(_ws_unit "$1")"; [ -f "$u" ] || return 0
   case "$1" in
-    systemd) command -v systemctl >/dev/null 2>&1 && systemctl --user disable --now outsourcerer-watcher.service >/dev/null 2>&1
+    systemd) command -v systemctl >/dev/null 2>&1 && systemctl --user disable --now "$(_ws_svc)" >/dev/null 2>&1
       rm -f "$u"; command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload >/dev/null 2>&1 ;;
-    launchd) command -v launchctl >/dev/null 2>&1 && launchctl bootout "gui/$(id -u)/com.outsourcerer.watcher" >/dev/null 2>&1; rm -f "$u" ;;
+    launchd) command -v launchctl >/dev/null 2>&1 && launchctl bootout "gui/$(id -u)/$(_ws_name)" >/dev/null 2>&1; rm -f "$u" ;;
   esac
   return 0
 }
@@ -379,19 +439,20 @@ _ws_install() {
     [ -z "${TMUX:-}" ] || printf 'export TMUX=%q\n' "${TMUX%%,*}"   # the user's tmux server (-L/-S), socket only
     [ -z "${TMUX_TMPDIR:-}" ] || printf 'export TMUX_TMPDIR=%q\n' "$TMUX_TMPDIR"
     for v in $(env | sed -n 's/^\(OSRC_WATCH_[A-Z_]*\)=.*/\1/p'); do printf 'export %s=%q\n' "$v" "${!v}"; done; } > "$(_ws_root)/env"
-  _ws_launcher || return 1
+  printf '%s\n' "$SCRIPT_PATH" > "$(_ws_root)/pinned"   # the copy the user chose to install from
+  _ws_launcher || { echo "outsourcerer: watcher install: refusing to run the watcher from $SCRIPT_PATH (a delegate worktree); install from the plugin copy" >&2; return 1; }
   _ws_stop_loop   # a loop already holding the lock would make the new unit exit and respawn forever
   case "$be" in
     systemd)
       { mkdir -p "${u%/*}" && printf '[Unit]\nDescription=Outsourcerer lane watcher\n\n[Service]\nExecStart="%s" "%s"\nEnvironment="OSRC_HOME=%s"\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n' \
         "$BASH" "$l" "$OSRC_HOME" > "$u" \
-        && systemctl --user daemon-reload && systemctl --user enable outsourcerer-watcher.service >/dev/null 2>&1 \
-        && systemctl --user restart outsourcerer-watcher.service; } \
+        && systemctl --user daemon-reload && systemctl --user enable "$(_ws_svc)" >/dev/null 2>&1 \
+        && systemctl --user restart "$(_ws_svc)"; } \
         || { echo "outsourcerer: systemd --user install failed; using the fallback loop instead" >&2; _ws_unit_rm systemd; be=fallback; } ;;
     launchd)
-      { mkdir -p "${u%/*}" && printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>com.outsourcerer.watcher</string>\n<key>ProgramArguments</key><array><string>%s</string><string>%s</string></array>\n<key>EnvironmentVariables</key><dict><key>OSRC_HOME</key><string>%s</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>\n</dict></plist>\n' \
-        "$(_ws_xml "$BASH")" "$(_ws_xml "$l")" "$(_ws_xml "$OSRC_HOME")" > "$u" \
-        && { launchctl bootout "gui/$(id -u)/com.outsourcerer.watcher" >/dev/null 2>&1
+      { mkdir -p "${u%/*}" && printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>%s</string>\n<key>ProgramArguments</key><array><string>%s</string><string>%s</string></array>\n<key>EnvironmentVariables</key><dict><key>OSRC_HOME</key><string>%s</string></dict>\n<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ProcessType</key><string>Background</string>\n</dict></plist>\n' \
+        "$(_ws_name)" "$(_ws_xml "$BASH")" "$(_ws_xml "$l")" "$(_ws_xml "$OSRC_HOME")" > "$u" \
+        && { launchctl bootout "gui/$(id -u)/$(_ws_name)" >/dev/null 2>&1
              launchctl bootstrap "gui/$(id -u)" "$u" || { sleep 1; launchctl bootstrap "gui/$(id -u)" "$u"; }; }; } \
         || { echo "outsourcerer: launchctl bootstrap failed (no GUI login session?); using the fallback loop instead" >&2; _ws_unit_rm launchd; be=fallback; } ;;
   esac
@@ -411,8 +472,11 @@ _ws_uninstall() {
 _ws_status() {
   local p d sid n=0 rc=0
   p="$(_ws_daemon_pid)"
-  printf 'watcher: installed=%s daemon=%s last_tick=%ss ago\n' "$(cat "$(_ws_root)/installed" 2>/dev/null || echo no)" "${p:-not-running}" \
-    "$(( $(_sv_now) - $(_sv_num "$(cat "$(_ws_root)/alive" 2>/dev/null)" 0) ))"
+  d="$(_sv_num "$(cat "$(_ws_root)/alive" 2>/dev/null)" 0)"
+  printf 'watcher: installed=%s daemon=%s last_tick=%s\n' "$(cat "$(_ws_root)/installed" 2>/dev/null || echo no)" "${p:-not-running}" \
+    "$([ "$d" -gt 0 ] && printf '%ss ago' $(( $(_sv_now) - d )) || printf never)"
+  d="$(sed -n 's/^# script: //p' "$(_ws_root)/launch" 2>/dev/null)"
+  [ -z "$d" ] || [ -f "$d" ] || { echo "launcher: BROKEN, it names $d, which is gone. Repair: $SCRIPT_PATH watcher install"; rc=3; }
   _ws_alive || { echo "coverage: NONE (no tick within $(_ws_stale)s). Install: $SCRIPT_PATH watcher install"; rc=3; }
   for d in "$(_ws_root)"/*/; do
     [ -f "$d/pending" ] || continue; sid="$(basename "$d")"; n=$((n + 1))

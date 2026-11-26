@@ -62,7 +62,7 @@ _osrc_hub_gh_fetch() { # <repo> <file>
   _osrc_hub_gh() { if type _osrc_net >/dev/null 2>&1; then OSRC_NET_TIMEOUT="${OSRC_HUB_GH_TIMEOUT:-10}" _osrc_net gh "$@"; else gh "$@"; fi; }
   if have gh 2>/dev/null; then
     rel="$(_osrc_hub_gh release list -R "$repo" --limit 40 --json tagName,name,publishedAt,isDraft 2>/dev/null)" || ok=false
-    [ "$ok" = true ] && { prs="$(_osrc_hub_gh pr list -R "$repo" --state all --limit 100 --json number,title,closedAt,mergedAt,url 2>/dev/null)" || ok=false; }
+    [ "$ok" = true ] && { prs="$(_osrc_hub_gh pr list -R "$repo" --state all --limit 100 --json number,title,closedAt,mergedAt,url,headRefName 2>/dev/null)" || ok=false; }
     [ "$ok" = true ] && { iss="$(_osrc_hub_gh issue list -R "$repo" --state closed --limit 100 --json number,title,closedAt,url,stateReason 2>/dev/null)" || ok=false; }
   else ok=false; fi
   jq -e 'arrays' >/dev/null 2>&1 <<<"${rel:-}" || { rel='[]'; ok=false; }
