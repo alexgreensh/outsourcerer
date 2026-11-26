@@ -10466,11 +10466,8 @@ cmd_bg() {
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
-  # PROVIDER is only the DEFAULT lane. A model alias routes per-model (`-m terra` goes to codex-native
-  # even while the default provider is devin), and that decision is made in the detached child, after
-  # this line prints. Stating "provider=devin" for a job that ran on codex-native is the tool lying
-  # about its own routing, so name it as a default and point at the record that is actually true.
-  echo "[outsourcerer] job $id launched (default lane: $PROVIDER; a model alias can route it elsewhere, and '$0 status $id' shows the model it really ran)." >&2
+  # PROVIDER/_OSRC_PIN_MODEL are the preflight's pinned route; the child refuses to dispatch any other.
+  echo "[outsourcerer] job $id launched on lane $PROVIDER, model $_OSRC_PIN_MODEL ('$0 status $id' shows what it ran)." >&2
   echo "[outsourcerer] NOW WATCH IT: $0 watch $id     (it runs unobserved until you do; status/result: $0 status $id | $0 result $id)" >&2
   _wake_on_finish_hint "$id"; _async_supervision_notice
 }

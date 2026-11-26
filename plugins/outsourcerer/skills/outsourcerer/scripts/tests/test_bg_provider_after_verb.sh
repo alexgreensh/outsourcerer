@@ -132,7 +132,11 @@ if have jq; then
     # OSRC_SOURCED must be UNSET for the child: we exported it =1 to source functions above, but the child
     # is a real run and OSRC_SOURCED=1 would make it skip main() and never launch.
     id="$( PATH="$FAKEBIN:$PATH" OSRC_HOME="$home" OSRC_SOURCED= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 \
-           bash "$SRC" --spend-ok bg "$@" 2>/dev/null | head -1 )"
+           bash "$SRC" --spend-ok bg "$@" 2>"$home/bg.err" | head -1 )"
+    # The launch line names the lane the job runs on (the --provider), never "default lane: devin".
+    if grep -q "launched on lane $lane, model " "$home/bg.err" && ! grep -q 'default lane' "$home/bg.err"; then
+      ok "e2e --provider $lane: launch line names lane $lane"
+    else bad "e2e --provider $lane: launch line: $(grep launched "$home/bg.err")"; fi
     local jd="$home/jobs/$id" i=0
     while [ "$i" -lt 60 ]; do [ -f "$jd/meta.json" ] && break; i=$((i+1)); sleep 0.1; done
     [ -f "$jd/meta.json" ] || { bad "e2e $lane: no meta.json was written"; return; }

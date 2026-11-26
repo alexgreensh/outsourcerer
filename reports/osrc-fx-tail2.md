@@ -24,3 +24,14 @@ Paths below are relative to `plugins/outsourcerer/skills/outsourcerer/scripts/`.
   Before (lib reverted): `110 passed, 2 failed` (the new check plus a knock-on in a later section, which
   the test now isolates by un-acking). After: `112 passed, 0 failed`.
   `tests/test_mc_alive.sh` (an acked queued item raises no alert). Before: `58 passed, 1 failed`. After: `59 passed, 0 failed`.
+
+## Item 4: the `bg` launch line names the real lane
+- On this base the line already printed the preflight's pinned provider (`PROVIDER=$_OSRC_PIN_PROVIDER`),
+  so `--provider droid` printed `default lane: droid`. It still called that a *default* and said "a model
+  alias can route it elsewhere", which is false: the child refuses (`_osrc_pinned_assert`) any route
+  other than the pinned one. The line now reads
+  `job <id> launched on lane <provider>, model <pinned model> ('… status <id>' shows what it ran)`.
+  `outsourcerer.sh` shrank by 3 lines (comment block replaced).
+- Tests: `tests/test_bg_provider_after_verb.sh` e2e now checks stderr for droid and warp. Before:
+  `27 passed, 2 failed` (`launched (default lane: droid; a model alias can route it elsewhere …`).
+  After: `29 passed, 0 failed`. `tests/test_lane_liveness.sh` static check follows the new wording: `14 passed, 0 failed`.
