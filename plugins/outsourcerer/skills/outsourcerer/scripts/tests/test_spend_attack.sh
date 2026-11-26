@@ -126,8 +126,15 @@ for m in SWE-1.7-HIGH swe-1.7-high Swe-1-7-High; do
   [ "$ids" = "swe-1-7-high " ] && [ "$rc" -eq 0 ] && ok "spell:$m launched exactly the judged Free id swe-1-7-high" \
     || bad "spell:$m launched '$ids' (rc=$rc)"
 done
-# Offline: nothing maps the spelling, so the CLI gets it verbatim; it must be judged verbatim too.
-for m in SWE-2-HIGH swe.2.high Swe-2-High; do
+# Offline, a case-only variant folds to the alias table's exact id (live-test F16): it launches
+# exactly the judged Free swe-2-high, never the raw spelling.
+for m in SWE-2-HIGH Swe-2-High; do
+  : > "$LOG"; out="$(offline run -m "$m" "say hi")"; rc=$?
+  [ "$(launched_ids | tr '\n' ' ')" = "swe-2-high " ] && [ "$rc" -eq 0 ] && ok "spell:offline $m launches exactly the judged Free swe-2-high" \
+    || bad "spell:offline $m launched '$(launched_ids | tr '\n' ' ')' (rc=$rc)"
+done
+# Offline, nothing maps a dot spelling, so the CLI gets it verbatim; it must be judged verbatim too.
+for m in swe.2.high; do
   : > "$LOG"; out="$(offline run -m "$m" "say hi")"; rc=$?
   refuses_paid "spell:offline $m (launches verbatim) is not judged as swe-2-high" "$out" "$rc" "$m"
   : > "$LOG"; out="$(offline run --spend-ok -m "$m" "say hi")"; rc=$?
