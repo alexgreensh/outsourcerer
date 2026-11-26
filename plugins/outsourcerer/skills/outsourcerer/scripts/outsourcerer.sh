@@ -18610,7 +18610,7 @@ $feedback"
 # is the caller), so resolve BASH_SOURCE with symlinks followed and fall back to $SCRIPT_DIR.
 _OSRC_FACTORY_DIR="$(_osrc_realpath "${BASH_SOURCE[0]:-$0}" 2>/dev/null)" && _OSRC_FACTORY_DIR="$(dirname "$_OSRC_FACTORY_DIR")" || _OSRC_FACTORY_DIR="$SCRIPT_DIR"
 for _f in factory-tasks factory-land factory-flow; do [ -f "$_OSRC_FACTORY_DIR/$_f.sh" ] && . "$_OSRC_FACTORY_DIR/$_f.sh"; done; unset _f
-[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || { unset _OSRC_LIBEND_SPEND _OSRC_LIBEND_SPENDPATHS _OSRC_LIBEND_DEVINFREE _OSRC_LIBEND_CAPS; for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; _osrc_spend_failclosed; }; unset _osrc_lib
+[ "$_OSRC_FACTORY_DIR" = "$SCRIPT_DIR" ] || { unset _OSRC_LIBEND_SPEND _OSRC_LIBEND_SPENDPATHS _OSRC_LIBEND_DEVINFREE _OSRC_LIBEND_CAPS; for _osrc_lib in "$_OSRC_FACTORY_DIR"/lib/*.sh; do [ -r "$_osrc_lib" ] && . "$_osrc_lib"; done; _osrc_spend_failclosed; _OSRC_LT_KEY=stale; _lane_table; }; unset _osrc_lib   # libs loaded late: rebuild the lane table so lib-defined lanes (opencode) are in it
 
 main() {
   # Mint this run's marker id once, and export it so the prompt the delegate receives and every
