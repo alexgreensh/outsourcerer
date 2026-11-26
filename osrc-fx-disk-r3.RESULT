@@ -1,4 +1,0 @@
-sha=5769ef957e7f0ae0f0199874873bdea9d5d0a898
-rc=1
-Conformance red (264 passed, 4 failed): test_shell_scratch was my lint suite (fixed in 89ebc24, suite and lint pass alone; full conformance not rerun); test_harness_isolation, test_vocab_hygiene, test_parity_insource_refresh fail as uid 0, also on base 5769ef9.
-Work head 89ebc24. Mechanism: OS temp cleaner deleted fixture files the test aged to 2020 under TMPDIR (reproduced 7/7 on Linux with a simulated cleaner, 0/8 after). Product fixes: guarded, pre-logged worktree removal (cleanup --apply deleted a .env inside ignored node_modules); exclusive pause records (overlapping sweeps orphaned SIGSTOPped processes: the test_disk_policy hang). test_disk_policy 40/40 green under stress from a symlinked TMPDIR with fake low df.
