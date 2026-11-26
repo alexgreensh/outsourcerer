@@ -88,6 +88,17 @@ grep -q 'the launch reported session https://example.invalid/session/abc' <<<"$e
   && ok "the stalled row says the launch reported a session, not that it is live" || bad "first row: $e1"
 [ -z "$e2" ] && [ -n "$e3" ] && ok "no repeat inside the stall interval, a repeat after it" || bad "repeat: e2=[$e2] e3=[$e3]"
 
+echo "=== F24: a lane whose record does not parse says so, once per renotify window ==="
+rv "OSRC_NOW=$NOW0 cmd_lane add broken1 --branch cloud/broken1 --repo '$REMOTE'" >/dev/null
+printf '{"id":"broken1", not json\n' > "$RH/remote/broken1.json"
+e1="$(rv "OSRC_NOW=$((NOW0+200)) osrc_remote_events" | grep '^EVENT failed broken1')"
+e2="$(rv "OSRC_NOW=$((NOW0+210)) osrc_remote_events" | grep '^EVENT failed broken1')"
+e3="$(rv "OSRC_NOW=$((NOW0+200+15*60)) osrc_remote_events" | grep '^EVENT failed broken1')"
+grep -q 'lane record unreadable' <<<"$e1" && [ -z "$e2" ] && [ -n "$e3" ] \
+  && ok "one failed event, repeated after the renotify window" || bad "unreadable: e1=[$e1] e2=[$e2] e3=[$e3]"
+[ "$(rv 'osrc_remote_state broken1')" = failed ] && ok "osrc_remote_state reports it failed" || bad "state: [$(rv 'osrc_remote_state broken1')]"
+rm -f "$RH/remote/broken1.json"
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

@@ -408,7 +408,7 @@ _osrc_lane_check_collect() { # <id> <json> <now>   (called under the lane lock)
 # ---- state + events ----------------------------------------------------------------------------
 osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no network, safe in hooks)
   local f; f="$(_osrc_lane_json "$1")"; [ -f "$f" ] || { printf gone; return 0; }
-  _osrc_remote_rec "$f" && _osrc_remote_state_rec "$1"
+  if _osrc_remote_rec "$f"; then _osrc_remote_state_rec "$1"; else printf failed; fi   # unreadable record
 }
 # The lane file in ONE jq (it was ~14 per lane per pass, also when the poll was throttled): sets _RR_*.
 # \037 separates; tabs and newlines inside values become spaces.
@@ -421,6 +421,11 @@ _osrc_remote_rec() { # <json>
      (.session_ref // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
   _RR_errn="${_RR_errn:-0}"; _RR_crc="${_RR_crc:-0}"
   case "$_RR_created" in ''|*[!0-9]*) _RR_created=0 ;; esac; case "$_RR_lastpush" in ''|*[!0-9]*) _RR_lastpush="$_RR_created" ;; esac
+}
+_osrc_remote_rec_or_say() { # <id> <json> <renotify>: _osrc_remote_rec, else one `failed` per window
+  _osrc_remote_rec "$2" && return 0
+  _osrc_ev_due "$1" unreadable "$3" && _osrc_emit failed "$1" "lane record unreadable: $2" "jq . $(printf '%q' "$2")"
+  return 1
 }
 _osrc_remote_state_rec() { # <id>: osrc_remote_state from the _RR_* record
   local id="$1" v ch_state=""
@@ -451,11 +456,11 @@ osrc_remote_events() {
   renotify="$(_osrc_mins "${OSRC_RENOTIFY_MIN:-15}")"
   for id in $(_osrc_remote_ids); do
     f="$(_osrc_lane_json "$id")"
-    _osrc_remote_rec "$f" || continue
+    _osrc_remote_rec_or_say "$id" "$f" "$renotify" || continue
     # Throttled and no check result to collect: the poll would only take and drop its lock.
     case "$_RR_lastpoll" in ''|*[!0-9]*) _RR_lastpoll=0 ;; esac
     if [ $(( now - _RR_lastpoll )) -lt "${OSRC_REMOTE_POLL_SECS:-60}" ] && [ "$_RR_cstate" != running ]; then :
-    else _osrc_lane_poll "$id" || true; _osrc_remote_rec "$f" || continue; fi
+    else _osrc_lane_poll "$id" || true; _osrc_remote_rec_or_say "$id" "$f" "$renotify" || continue; fi
     head="$_RR_head"; sha7="${head:0:7}"
     # poll trouble: auth / rate limit at once, anything else after N consecutive failures
     errn="$_RR_errn"; errk="$_RR_errk"
