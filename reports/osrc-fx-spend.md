@@ -23,7 +23,7 @@ outsourcerer.sh: +6 / −8 lines, all on spend-gate lines (loader check, the two
 
 ## Tests run (Linux, bash 5, niced, one at a time)
 
-All exit 0 at 3d68367 unless noted: test_devin_catalog_free_tier, test_devin_probe_strict,
+All exit 0 at 182061e unless noted: test_devin_catalog_free_tier, test_devin_probe_strict,
 test_devin_free_guard, test_devin_launch_gate, test_spend_consent, test_lane_billing,
 test_limit_gate, test_tool_bugs_062, test_advise_task_shape, test_escalation_classify,
 test_no_silent_escalation, test_cc_devin_selfheal, test_launch_sites, test_spend_lib_failclosed,
@@ -31,9 +31,17 @@ test_cloud_gate, test_cloud_gate_coverage, test_factory_exclude, test_devin_plan
 test_devin_plan_quota_probe (rc 1 until the suite's alt pin was fixed, then 0), test_p56_factory_child, test_p56_r2,
 test_factory_tasks, test_session_control, test_lifecycle_fix, test_tests_set_home,
 test_sed_extract_targets, test_devin_alias_resolution, test_catalog_validation,
-test_delegate_attribution.
+test_delegate_attribution, test_cloud_autoisolate, test_cloudrun, test_no_pipe_grep_q,
+test_shell_scratch.py. `test_spend_attack.sh`: 59/59, rc 0 (also 59/59 under a 90-char TMPDIR).
 
-CONFORMANCE_PLACEHOLDER
+`bash tests/conformance.sh` (final, at 182061e): **rc=1, 264 passed, 3 failed, 14 skipped**. The
+3 failures are test_harness_isolation, test_vocab_hygiene and test_parity_insource_refresh. Each
+fails the same way on the base 1e0064b in this container, which runs as uid 0. They inject
+failure through read-only files or permissions, and root ignores those. They are not caused by
+this lane, but conformance is red, so RESULT says rc=1. The first conformance run also caught
+4 failures of mine (test_cloud_autoisolate and test_cloudrun asserted the old disclosure
+argument and the removed fail-open cloud path; a `| grep -q` in test_launch_sites; an unquoted
+mktemp template in test_spend_attack). All 4 are fixed in 182061e.
 
 ## What remains unproven
 
