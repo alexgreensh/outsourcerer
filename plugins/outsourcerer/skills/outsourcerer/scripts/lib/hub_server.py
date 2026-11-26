@@ -816,9 +816,11 @@ def make_handler(hub):
 
         def do_POST(self):
             if urllib.parse.urlparse(self.path).path == "/reopen":
-                sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
-                if not self._host_ok() or not self._post_origin_ok() or not (self.headers.get("Origin") or sfs == "same-origin"):
+                if not self._host_ok() or not self._post_origin_ok():
                     return self._deny()
+                sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                if not (self.headers.get("Origin") or sfs == "same-origin"):
+                    return self._send_json(self.REOPEN_DENIED, 403)
                 return self._reopen()
             if not self._host_ok() or not self._token_ok() or not self._post_origin_ok():
                 return self._deny()
