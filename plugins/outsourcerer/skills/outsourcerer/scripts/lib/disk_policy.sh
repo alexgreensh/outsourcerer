@@ -541,12 +541,12 @@ _osrc_disk_episode_end() { rm -f "$(_osrc_disk_dir)/.episode" "$(_osrc_disk_dir)
 
 # ---- merged-lane auto-reclaim -------------------------------------------------------------
 
-# _osrc_disk_lane_sha <repo> <branch> <base> -> the branch tip, only when it is preserved
+# _osrc_disk_lane_sha <repo> <branch> -> the branch tip, only when it is preserved
 # on main/remote (or a tip-matched merged PR) and did not move during the proof.
 _osrc_disk_lane_sha() {
   local sha
   sha="$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" || return 1
-  _osrc_branch_merged "$1" "$2" "$3" || return 1
+  _osrc_branch_merged "$1" "$2" || return 1   # never a 3rd arg: that is the --any-ref switch
   [ "$(git -C "$1" rev-parse -q --verify "refs/heads/$2" 2>/dev/null)" = "$sha" ] && printf '%s' "$sha"
 }
 
@@ -557,15 +557,15 @@ _osrc_disk_cl_log() { printf '%s\t%s\tdisk-policy\t%s\n' "$(date -u +%Y-%m-%dT%H
 # every visible file is tracked at a preserved commit), then the recorded branch (conditional
 # on the proven commit and not checked out anywhere).
 _osrc_disk_reclaim_lane() {
-  local s="$1" items="$2" wj br base repo wt sha pp n=0 k
+  local s="$1" items="$2" wj br repo wt sha pp n=0 k
   wj="$OSRC_JOBS/$s/worktree.json"; [ -f "$wj" ] || wj="$OSRC_HOME/loops/$s/worktree.json"
-  br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"; base="$(jq -r '.base_sha // ""' "$wj" 2>/dev/null)"
+  br="$(jq -r '.branch // ""' "$wj" 2>/dev/null)"
   [ -n "$br" ] || { printf 0; return 0; }
   # Any worktree of this lane that is not SAFE (dirty, live owner...) keeps the whole lane.
   [ -z "$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="ASK") | .path' 2>/dev/null)" ] || { printf 0; return 0; }
   repo="$(printf '%s\n' "$items" | jq -r --arg s "$s" 'select(.session==$s and (.kind=="worktree" or .kind=="branch")) | .repo' 2>/dev/null | head -1)"
   [ -n "$repo" ] || { printf 0; return 0; }
-  sha="$(_osrc_disk_lane_sha "$repo" "$br" "$base")" || { printf 0; return 0; }
+  sha="$(_osrc_disk_lane_sha "$repo" "$br")" || { printf 0; return 0; }
   wt="$(printf '%s\n' "$items" | jq -c --arg s "$s" 'select(.session==$s and .kind=="worktree" and .verdict=="SAFE")' 2>/dev/null | head -1)"
   if [ -n "$wt" ]; then
     [ "$(_osrc_cleanup_verdict "$(jq -c 'del(.verdict,.why,.size_kb)' <<<"$wt")" 2>/dev/null | cut -f1)" = SAFE ] || { printf 0; return 0; }

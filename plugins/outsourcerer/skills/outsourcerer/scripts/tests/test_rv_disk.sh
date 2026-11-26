@@ -84,5 +84,10 @@ git -C "$W" update-index --assume-unchanged app.txt; printf 'edited\n' > "$W/app
 printf 'v1\n' > "$W/app.txt"
 [ "$(wtr "$W")" = rc=0 ] && [ ! -d "$W" ] && ok "an unchanged assume-unchanged file does not block removal" || bad "unchanged hidden file blocked removal"
 
+echo "=== F12: auto-reclaim never passes a base sha into the --any-ref slot ==="
+git -C "$R" branch -q lane-f12 main
+o="$(osrc "_osrc_branch_merged() { echo \"argc=\$# \${3:-}\"; return 1; }; _osrc_disk_lane_sha \"$R\" lane-f12 \$(git -C \"$R\" rev-parse main)")"
+[ "$o" = "argc=2 " ] && ok "_osrc_disk_lane_sha asks _osrc_branch_merged with repo and branch only" || bad "lane sha passed: $o"
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
