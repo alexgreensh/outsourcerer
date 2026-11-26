@@ -1,0 +1,4 @@
+sha=c36e487339b9e48d61a3d33702c3b53a11642caa
+rc=1
+Conformance red (260 passed, 6 failed). 3 failures are root-only and also fail on the base. test_no_pipe_grep_q was my test, fixed in 3c62dbc. test_cleanup_manifest and test_disk_policy (timeout) failed only under conformance load and pass alone.
+All lane suites green alone, including the new tests/test_disk_r2.sh (22/22; 17 fail on the base). Head: the commit adding this file, on top of 3c62dbc. See reports/osrc-fx-disk-r2.md.

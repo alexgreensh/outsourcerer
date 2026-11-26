@@ -49,7 +49,7 @@ the real `outsourcerer.sh cleanup` CLI.
 ## Conformance
 
 `cd plugins/outsourcerer/skills/outsourcerer/scripts && nice bash tests/conformance.sh`, run once,
-on `a1c5e0e`, the commit before the last fix: **rc=1**, `RESULT: 260 passed, 6 failed, 14 skipped`.
+on `457e47c`, the commit before the last fix: **rc=1**, `RESULT: 260 passed, 6 failed, 14 skipped`.
 
 - `test_harness_isolation`, `test_vocab_hygiene`, `test_parity_insource_refresh`: these fail because
   the container runs as root, and they fail the same way on the base. Round 1's report describes them.
