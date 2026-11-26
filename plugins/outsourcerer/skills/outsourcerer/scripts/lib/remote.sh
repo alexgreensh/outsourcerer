@@ -427,14 +427,20 @@ osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no net
   _osrc_remote_rec "$f" && _osrc_remote_state_rec "$1"
 }
 # The lane file in ONE jq (it was ~14 per lane per pass, also when the poll was throttled): sets _RR_*.
-# \037 separates; tabs and newlines inside values become spaces.
-_osrc_remote_rec() { # <json>
-  IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
-    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref < <(jq -r 'def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");
-    [(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
+# \037 separates; tabs and newlines inside values become spaces. _OSRC_RR_DEF/_OSRC_RR_ROW are also
+# run over many lane files in one jq (lib/owner_state.sh, the stop guard's batch).
+_OSRC_RR_DEF='def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");'
+_OSRC_RR_ROW='[(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
      (.check.rc // 0), (.proof_back // ""), (.head_ready // false), (.ready_head // ""), (.poll_branch // .branch // ""),
      (.head_msg // ""), (.seen_branch // false), (.created_ts // 0), (.last_poll_ts // 0), (.last_push_ts // .created_ts // 0),
-     (.session_ref // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
+     (.session_ref // "")] | map(c) | join("\u001f")'
+_osrc_remote_rec() { # <json>
+  local l; IFS= read -r l < <(jq -r "$_OSRC_RR_DEF $_OSRC_RR_ROW" "$1" 2>/dev/null) || return 1
+  _osrc_remote_rec_set "$l"
+}
+_osrc_remote_rec_set() { # <one \037-separated record line>
+  IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
+    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref <<<"$1"
   _RR_errn="${_RR_errn:-0}"; _RR_crc="${_RR_crc:-0}"
   case "$_RR_created" in ''|*[!0-9]*) _RR_created=0 ;; esac; case "$_RR_lastpush" in ''|*[!0-9]*) _RR_lastpush="$_RR_created" ;; esac
 }
