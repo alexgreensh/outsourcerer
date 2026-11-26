@@ -46,7 +46,34 @@ function f32() {
   ok(api.renders > before, 'F32: the page re-renders so the band shows');
 }
 
-const S = { F32: f32 };
+// The liveness strip (hub-alive.js) on a fake fetch and clock.
+function alive(fetchImpl) {
+  const body = new El('body'), head = new El('head'), main = new El('main'); main.setAttribute('id', 'main'); body.append(main);
+  const clock = { t: 1800000000000 }, store = {};
+  const document = { readyState: 'complete', head, body, createElement: (t) => new El(t), createTextNode: (t) => new El('#text', '', t),
+    getElementById: (id) => body.all().find((e) => e.id === id) || null, addEventListener() {} };
+  const window = { fetch: fetchImpl, OSRC_HUB_ALIVE_NOW: () => clock.t };
+  vm.runInNewContext(read('hub-assets/hub-alive.js'), { window, document, location: { href: 'http://127.0.0.1:8788/', origin: 'http://127.0.0.1:8788' },
+    sessionStorage: { getItem: (k) => store[k] || null, setItem() {} }, URL, Map, Date, setInterval: () => 0, console });
+  const text = () => { const b = body.all().find((e) => e.id === 'osrc-alive'); return b ? b.querySelector('.al-text').textContent : ''; };
+  return { window, clock, text, paint: () => window.OSRC_HUB_ALIVE.paint(), cls: () => body.all().find((e) => e.id === 'osrc-alive').className };
+}
+const res = (json) => ({ status: 200, ok: true, clone() { return { json: () => Promise.resolve(json) }; }, json: () => Promise.resolve(json) });
+const hhmm = (ms) => { const d = new Date(ms); return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+
+// F33: the hub answers 200 with its last lanes and export_error: the strip must not say "Live".
+async function f33() {
+  const since = 1800000000 - 600;
+  const P = alive(() => Promise.resolve(res({ generated_at: since - 60, projects: [], export_error: 'export failed', export_error_since: since })));
+  await P.window.fetch('/api/projects'); await tick(); await tick(); P.clock.t += 3000; P.paint();
+  ok(P.text() === 'Not live: export failing since ' + hhmm(since * 1000) + ' · lane data from 11 min ago', 'F33: a failing export reads "Not live: export failing since HH:MM" (got: ' + P.text() + ')');
+  ok(P.cls() === 'al-warn', 'F33: the strip is a warning');
+  const Q = alive(() => Promise.resolve(res({ generated_at: 1800000000, projects: [] })));
+  await Q.window.fetch('/api/projects'); await tick(); await tick(); Q.clock.t += 2000; Q.paint();
+  ok(Q.text() === 'Live · updated 2s ago', 'F33: a healthy export still reads Live (got: ' + Q.text() + ')');
+}
+
+const S = { F32: f32, F33: f33 };
 (async () => {
   if (!S[section]) { console.log('FAIL: unknown section ' + section); process.exit(1); }
   await S[section]();

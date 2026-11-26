@@ -91,6 +91,7 @@ class Hub:
         self.plans_finished = 0.0
         self.cache_ts = 0.0
         self.export_error = ""
+        self.export_error_at = 0   # when exports started failing (the page says "export failing since")
         self.lock = threading.Lock()
         self.export_lock = threading.Lock()
         self.last_poll = time.time()
@@ -336,6 +337,7 @@ class Hub:
             self.cache = data
             self.cache_ts = time.time()
             self.export_error = ""
+            self.export_error_at = 0
         self.last_state_mtime = self.state_mtime()
         self._prev_scan = self._scan
         return data
@@ -391,6 +393,7 @@ class Hub:
             self.cache = data
             self.cache_ts = time.time()
             self.export_error = ""
+            self.export_error_at = 0
         self.last_state_mtime = self.state_mtime()
         self._prev_scan = self._scan
         return data
@@ -402,9 +405,13 @@ class Hub:
                         and (self.state_mtime() != self.last_state_mtime or time.time() - self.cache_ts > REFRESH_SECS + 10):
                     self.run_export()
             except Exception as e:  # keep serving last good cache; surface the error
-                with self.lock:
-                    self.export_error = str(e)[:300]
+                self.note_error(e)
             time.sleep(REFRESH_SECS)
+
+    def note_error(self, e):
+        with self.lock:
+            self.export_error = str(e)[:300]
+            self.export_error_at = self.export_error_at or int(time.time())
 
     def load_saved(self):
         """Warm start: serve the last export.json this hub wrote while the first export runs, so a
@@ -468,6 +475,7 @@ class Hub:
                         return self._merge_project_export(slug, timeout=SNAP_EXPORT_SECS), ""
                     return self.run_export(timeout=SNAP_EXPORT_SECS), ""
                 except Exception as e:
+                    self.note_error(e)
                     with self.lock:
                         if self.cache is not None:
                             return self.cache, str(e)[:300]
@@ -476,6 +484,7 @@ class Hub:
         try:
             return self.run_export(), ""
         except Exception as e:
+            self.note_error(e)
             with self.lock:
                 if self.cache is not None:
                     return self.cache, str(e)[:300]
@@ -782,8 +791,8 @@ def make_handler(hub):
                 if not hub.first_export.wait(timeout=STARTING_WAIT):
                     return self._send_json({"generated_at": int(time.time()), "projects": [], "starting": True})
                 payload, err = hub.projects_payload()
-                if err:
-                    payload["export_error"] = err
+                if err:   # the page reads both: "Not live: export failing since HH:MM"
+                    payload = dict(payload, export_error=err, export_error_since=hub.export_error_at or int(time.time()))
                 self._send_json(payload)
             elif path == "/api/answers":
                 self._send_json(hub.answers())
@@ -890,6 +899,7 @@ def main():
         try:
             hub.run_export()
         except Exception as e:
+            hub.note_error(e)
             sys.stderr.write("[hub] initial export failed (will retry): %s\n" % e)
         finally:
             with hub.lock:
