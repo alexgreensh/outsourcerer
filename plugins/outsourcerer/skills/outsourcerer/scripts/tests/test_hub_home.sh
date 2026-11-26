@@ -74,7 +74,7 @@ grep -q "forms = {}" "$PAGE" "$JS" && bad "renderMain still wipes the drafts" ||
 grep -q "ta.value = f.note" "$DEC" && grep -q "String(opt === f.choice)" "$DEC" && ok "text + chosen option restored on render" || bad "draft not restored"
 grep -q "n.focus({ preventScroll: true })" "$PAGE" && grep -q "setSelectionRange(keep.s, keep.e" "$PAGE" && ok "focus + caret restored after render" || bad "focus/caret restore missing"
 grep -q "if (composing || (D && D.busy())) { pending = true; return; }" "$PAGE" && grep -q "compositionend" "$PAGE" && ok "render held during IME composition and in-flight send" || bad "composition/send hold missing"
-grep -q "if (s === sigP && !firstPull && !pullErr) return" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && grep -q "k === 'summaryAt'" "$PAGE" && ok "identical polls re-render nothing (projects, answers, limits)" || bad "identical-poll skip missing"
+grep -qF "if (s === sigP && !firstPull && !pullErr) {" "$PAGE" && grep -qF "if (A && A.refresh(projects).moved) pollRender(); return; }" "$PAGE" && grep -q "if (s === sigL) return" "$PAGE" && grep -q "k === 'exported_at'" "$PAGE" && grep -q "k === 'summaryAt'" "$PAGE" && ok "identical polls re-render nothing unless a lane changed band (F32; projects, answers, limits)" || bad "identical-poll skip missing"
 if command -v node >/dev/null 2>&1; then
   pr="$(node - "$JS" <<'NODE' 2>&1
 const fs = require('fs'), vm = require('vm'); const win = {};

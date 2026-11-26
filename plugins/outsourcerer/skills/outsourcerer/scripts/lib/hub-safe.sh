@@ -39,7 +39,7 @@ _osrc_hub_mc_find() {
     got="$(curl -s -m 3 "http://127.0.0.1:$p/hello?n=$n" 2>/dev/null | jq -r '.proof // empty | strings' 2>/dev/null)"
     [ -n "$got" ] || continue
     want="$(printf '%s\n' "$tok" | python3 -I -c 'import hashlib, hmac, sys
-print(hmac.new(sys.stdin.readline().strip().encode(), ("osrc-hub-hello:" + sys.argv[1]).encode(), hashlib.sha256).hexdigest())' "$n" 2>/dev/null)"
+print(hmac.new(sys.stdin.buffer.readline().strip(), ("osrc-hub-hello:" + sys.argv[1]).encode(), hashlib.sha256).hexdigest())' "$n" 2>/dev/null)"
     [ -n "$want" ] && [ "$got" = "$want" ] && { printf '%s' "$p"; return 0; }
   done
   return 1
