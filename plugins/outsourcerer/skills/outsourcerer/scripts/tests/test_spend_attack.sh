@@ -259,6 +259,13 @@ b="$(inproc '_osrc_lane_spendable dv swe-2-1-high && echo SPENDABLE || echo NO')
 out="$(inproc 'OSRC_SPEND_OK=1; _OSRC_SPEND_BOUND_LANE=or; _OSRC_SPEND_BOUND_MODEL=z-ai/glm-5.2; tier=auto; PROVIDER=devin delegate auto "" -m swe "heal"')"
 if launched swe-2-1-high; then bad "hop:cc->Devin self-heal launched paid swe-2-1-high on OpenRouter consent"
 else case "$out" in *"spend gate"*) ok "hop:cc->Devin self-heal onto paid swe-2-1-high refused" ;; *) bad "hop:self-heal no refusal: $(printf '%s' "$out" | tail -2)" ;; esac; fi
+# session model: an explicit --provider that disagrees with the session record must not pick the
+# lane the gate bills while the switch drives the recorded provider's picker (rv F2).
+b="$(inproc '_session_record() { printf "devin\tswe-1-7-high\n"; }; _osrc_spend_gate() { echo "GATED:$1"; }; SESSION_NAME=s1; PROVIDER=cc; PROVIDER_EXPLICIT=1; _osrc_session_model_gate swe-2-1-high; echo rc=$?')"
+case "$b" in *GATED:*) bad "model:--provider cc on a Devin session gated lane ${b#*GATED:}" ;;
+  *"does not match session"*) ok "model:--provider cc on a Devin session is refused before any gate or switch" ;; *) bad "model:provider mismatch said: $b" ;; esac
+b="$(inproc '_session_record() { printf "devin\tswe-1-7-high\n"; }; _osrc_spend_gate() { echo "GATED:$1"; }; SESSION_NAME=s1; PROVIDER=cc; PROVIDER_EXPLICIT=0; _osrc_session_model_gate swe-2-1-high')"
+case "$b" in GATED:dv|GATED:devin) ok "model:the gate judges the session's recorded provider (Devin)" ;; *) false ;; esac || bad "model:recorded-provider gate said: $b"
 # session effort relaunches the pane process (codex/cc/droid): a new process asks like a start.
 b="$(inproc '_session_control_relaunch() { echo RELAUNCHED >&2; }; SESSION_NAME=s1; OSRC_SPEND_NEXT=x; _session_relaunch_effort codex sol high')"
 case "$b" in *RELAUNCHED*) bad "relaunch:session effort relaunched codex (billing unproven) with no consent" ;;

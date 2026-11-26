@@ -47,12 +47,19 @@ _session_relaunch_effort() {
 
 # _osrc_session_model_gate [NAME] -> `session model` refuses an excluded NAME, then
 # spend-gates the switch. Devin's picker selects by search text, so the gate judges the
-# exact NAME; with no NAME the picker's choice is unknown and the gate asks.
+# exact NAME; with no NAME the picker's choice is unknown and the gate asks. The lane judged is the
+# session's RECORDED provider (the TUI _managed_session_model drives); an explicit --provider that
+# names another lane is refused, or it would bill-check one lane and switch another (rv F2).
 _osrc_session_model_gate() {
-  local name="${1:-}"
+  local name="${1:-}" prov
   [ -n "$name" ] && _exclude_refuse "$name" "session model"
+  prov="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f1)"
+  if [ -n "$prov" ] && [ "${PROVIDER_EXPLICIT:-0}" = 1 ] && [ "$(_osrc_session_lane "${PROVIDER:-}")" != "$(_osrc_session_lane "$prov")" ]; then
+    die "session model refused: --provider ${PROVIDER:-} does not match session '${SESSION_NAME:-}', which runs $prov. Nothing was switched. Drop --provider:  $0 session model${name:+ $(printf '%q' "$name")}"
+  fi
+  prov="${prov:-${PROVIDER:-}}"
   [ -n "${OSRC_SPEND_NEXT:-}" ] || OSRC_SPEND_NEXT="$0 --spend-ok session model${name:+ $(printf '%q' "$name")}"
-  _osrc_spend_gate "$(_osrc_session_lane "${PROVIDER:-}")" "$name" "${PROVIDER:-}" "session model switch"
+  _osrc_spend_gate "$(_osrc_session_lane "$prov")" "$name" "$prov" "session model switch"
 }
 # _osrc_or_member_gate <model> -> delegate_cc / delegate_codex judge EVERY OpenRouter chain member
 # before launching it. route_delegate showed (and the user consented to) one model; on a transport
@@ -68,14 +75,13 @@ _osrc_or_member_gate() {
 # case after leading blanks. One plain id after it is gated as `session model <id>` on the session's
 # recorded provider; no id or anything else after /model is refused (the pick would be unknown).
 _osrc_session_send_model_gate() {
-  local t="${1:-}" arg rest prov
+  local t="${1:-}" arg rest
   t="${t#"${t%%[![:space:]]*}"}"
   case "$t" in /[Mm][Oo][Dd][Ee][Ll]|/[Mm][Oo][Dd][Ee][Ll][[:space:]]*) ;; *) return 0 ;; esac
   read -r _ arg rest <<<"$t"
   case "$arg" in ''|*[!A-Za-z0-9._:/@-]*) arg="" ;; esac
   [ -n "$arg" ] && [ -z "$rest" ] || die "session send refused: text starting with /model switches the model with no spend check. Nothing was typed. Use:  $0 session model <name>"
-  prov="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f1)"
-  PROVIDER="${prov:-${PROVIDER:-}}" _osrc_session_model_gate "$arg"
+  _osrc_session_model_gate "$arg"
 }
 
 # _osrc_take_spend_ok <args...> -> _OSRC_ARGS = args without any --spend-ok before `--` (each one
