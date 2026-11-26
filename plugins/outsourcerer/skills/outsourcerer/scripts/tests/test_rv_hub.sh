@@ -171,6 +171,10 @@ if on F42; then
   a="$(OSRC_HUB_FAST=0 lib eval "$q")"; b="$(OSRC_HUB_FAST=1 lib eval "$q")"
   [ "$a" = done ] && ok "F42: a one-shot export resolves an uncached pr: contract inline" || no "F42: one-shot reads $a"
   [ "$b" = not-done ] && ok "F42: the serve loop keeps the cached, queued path" || no "F42: serve loop reads $b"
+  printf '{"spec":"check:true","cwd":"%s"}\n' "$TMP" > "$OSRC_HOME/done/d42c.json"
+  q='_osrc_hub_memo_begin; osrc_done_state d42c; _osrc_hub_memo_end'
+  b="$(OSRC_HUB_FAST=1 lib eval "$q")"; a="$(OSRC_HUB_FAST=0 lib eval "$q")"
+  [ "$b" = not-done ] && [ "$a" = done ] && ok "F42: a check: with no verdict yet runs in the one-shot export (serve loop: deferred)" || no "F42: check: one-shot=$a serve=$b"
   rm -f "$OSRC_HOME"/hub/cache/scr/.dwant.*
 fi
 
