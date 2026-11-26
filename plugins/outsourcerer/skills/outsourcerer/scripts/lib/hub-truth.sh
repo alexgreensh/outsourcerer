@@ -27,25 +27,36 @@ def dcat: if (.status // "") | IN("Merged", "Shipped") then "merged"
   elif .status == "Blocked" or ((.state // "") | IN("approval", "question", "limit")) then "blocked"
   elif .status == "Idle" or .state == "idle" then "idle"
   else "working" end;
+# dwhy: why a blocked lane waits (a disk-paused or limit-parked lane is not an approval prompt).
+def dwhy: if .state == "question" then "question"
+  elif .status == "Paused" or ((.note // "") | startswith("Paused")) then "paused"
+  elif .state == "limit" then "limit" elif .status == "Unverified" then "unverified"
+  elif .state == "approval" then "approval" else "blocked" end;
+def dwhyt: {approval: "waiting for approval", question: "waiting for an answer", paused: "paused (low disk)",
+  limit: "at a usage limit", unverified: "finished without a done marker", blocked: "blocked"}[.];
 def dcount: (. // []) | map(. + {_c: dcat}) as $l
   | reduce ("working","blocked","idle","ready","done","merged","failed","canceled") as $k
       ({n: ($l | length)}; .[$k] = ([$l[] | select(._c == $k)] | length))
   | . + {pick: (reduce ("blocked","ready","done","failed") as $k ({};
            .[$k] = ([$l[] | select(._c == $k) | (.short // .id)] | .[0:3]))),
+         why: (reduce ($l[] | select(._c == "blocked") | dwhy) as $w ({}; .[$w] += 1)),
          finished: [$l[] | select((._c | IN("ready","done")) and ((.ended // false) | not) and (.activeAt // 0) > 0)
                    | {id, short: (.short // .id), at: .activeAt}]};
 def dplural($n; $w): "\($n) \($w)\(if $n == 1 then "" else "s" end)";
 def dnames($a; $n): ($a | join(", ")) + (if $n > ($a | length) then " and \($n - ($a | length)) more" else "" end);
 def dtext: . as $c
+  | ((.why // {}) | to_entries | map(select(.value > 0))) as $w
+  | (if ($w | length) == 0 then [.blocked | tostring + " blocked"] else $w | map("\(.value) \(.key | dwhyt)") end) as $why
+  | (if ($w | length) == 0 then ["blocked"] else $w | map(.key | dwhyt) end) as $whys
   | (if .n == 0 then null
      elif .working + .blocked > 0 then "building"
      elif .ready > 0 then "review"
      else "idle" end) as $st
   | (if .n == 0 then null else
-      dplural(.n; "lane") + ": " + ([["working","working"],["blocked","waiting for approval"],["idle","idle"],
+      dplural(.n; "lane") + ": " + ([["working","working"],["blocked",""],["idle","idle"],
         ["ready","ready for review"],["done","done"],["merged","merged"],["failed","failed"],["canceled","canceled"]]
-        | map(select($c[.[0]] > 0) | "\($c[.[0]]) \(.[1])") | join(", ")) end) as $sum
-  | (if .blocked > 0 then "Unblock " + dnames(.pick.blocked; .blocked) + ": waiting for approval"
+        | map(select($c[.[0]] > 0) | if .[0] == "blocked" then $why[] else "\($c[.[0]]) \(.[1])" end) | join(", ")) end) as $sum
+  | (if .blocked > 0 then "Unblock " + dnames(.pick.blocked; .blocked) + ": " + ($whys | join(", "))
      elif .ready > 0 then "Review " + dnames(.pick.ready; .ready)
      elif .done > 0 then "Pick up the result of " + dnames(.pick.done; .done)
      elif .failed > 0 and .working == 0 then "Look at the failed " + dnames(.pick.failed; .failed)
@@ -56,6 +67,7 @@ def dmerge: reduce .[] as $c ({n:0,working:0,blocked:0,idle:0,ready:0,done:0,mer
     pick:{blocked:[],ready:[],done:[],failed:[]}, finished:[], evidenceAt:0};
   reduce ("n","working","blocked","idle","ready","done","merged","failed","canceled") as $k (.; .[$k] += ($c[$k] // 0))
   | reduce ("blocked","ready","done","failed") as $k (.; .pick[$k] = ((.pick[$k] + ($c.pick[$k] // []))[0:3]))
+  | .why = reduce (($c.why // {}) | to_entries[]) as $e (.why // {}; .[$e.key] += $e.value)
   | .finished += ($c.finished // []) | .evidenceAt = ([.evidenceAt, ($c.evidenceAt // 0)] | max));
 # attention: what a lane asks of you, most urgent first (references/hub.md, "Attention"). Stalled lanes
 # are the ones whose nudge did not help (lib/mc_alive.sh needs-you alerts).

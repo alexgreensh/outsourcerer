@@ -44,6 +44,15 @@ o="$(osrc "$H" '_sv_append card card "card for project-a is stale" "x hub report
   printf "A:%s\n" "$(_sv_read_range "$OSRC_HOME/lanes/events.jsonl" 0 - "$(_sv_target_set lane-a)" sess-a | cut -f3)"')"
 grep -qx 'B:' <<<"$o" && grep -qx 'A:card' <<<"$o" && ok "session B does not get session A's card nag; A does" || bad "card routing: $o"
 
+echo "=== F22: a blocked card names why each lane waits ==="
+J='[{"id":"a","short":"disk lane","status":"Blocked","note":"Paused: disk below 5G","state":"limit"},{"id":"b","short":"cap lane","status":"Building","state":"limit"},{"id":"c","short":"q lane","status":"Building","state":"question"}]'
+o="$(osrc "$(home f22)" "_osrc_hub_derive '$J' 0")"
+[ "$(jq -r .summary <<<"$o")" = "3 lanes: 1 paused (low disk), 1 at a usage limit, 1 waiting for an answer" ] \
+  && [ "$(jq -r .next <<<"$o")" = "Unblock disk lane, cap lane, q lane: paused (low disk), at a usage limit, waiting for an answer" ] \
+  && ok "disk-paused, limit-parked and question lanes are worded as such" || bad "derived: $o"
+o="$(osrc "$(home f22)" "_osrc_hub_derive '[{\"id\":\"c\",\"short\":\"ask\",\"status\":\"Blocked\",\"state\":\"approval\"}]' 0")"
+[ "$(jq -r .next <<<"$o")" = "Unblock ask: waiting for approval" ] && ok "an approval prompt still reads as one" || bad "approval: $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"
