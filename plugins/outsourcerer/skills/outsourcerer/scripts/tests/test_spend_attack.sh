@@ -232,6 +232,11 @@ for envset in "_OSRC_LF_local__disp=or|_OSRC_LF_local__aliases=or openrouter tok
   case "$row" in *metered*) ok "lanetable:inherited ${envset%%=*}... leaves OpenRouter metered" ;;
     *) bad "lanetable:inherited ${envset%%=*}... rewrote OpenRouter: '$row'" ;; esac
 done
+# An inherited disk-override marker for "this very process" (a wrapper exports "$$|<start>" and
+# execs the engine) must not pass the launch floor as same-command (rv F6).
+b="$( cd "$TMP" && HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" bash -c 'id="$(LC_ALL=C ps -o lstart= -p $$ | sed "s/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g")"
+  export _OSRC_DISK_OVERRIDE_OK="$$|$id"; exec bash -c ". \"\$SRC\" >/dev/null 2>&1; _osrc_disk_override_take 1 1 && echo PASSED || echo REFUSED"' 2>&1 </dev/null )"
+[ "$b" = REFUSED ] && ok "disk:inherited _OSRC_DISK_OVERRIDE_OK grants no override" || bad "disk:inherited override marker said: $b"
 # The bg job marker: a wrong token, or a job dir outside $OSRC_HOME/jobs, grants nothing.
 mkdir -p "$DOH/jobs/j1" "$TMP/elsewhere"
 printf '#osrc-spend-ok token=t0k\ndv|swe-1-7-max\n' > "$DOH/jobs/j1/.spend-ok"

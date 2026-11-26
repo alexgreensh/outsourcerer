@@ -277,7 +277,7 @@ unset OSRC_PROVIDER_INJECTED
 # parents pass it to children explicitly (bg -> preflight/job child). Every command entry
 # point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
 # display hint the gate never executes.
-unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_DISK_OVERRIDE_OK _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
