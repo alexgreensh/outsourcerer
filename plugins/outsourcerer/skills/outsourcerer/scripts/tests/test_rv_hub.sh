@@ -97,5 +97,15 @@ if on F36; then
   [ "$s2" = Unverified ] && ok "F36: no contract and no marker still reads Unverified" || no "F36: unverified shows $s2"
 fi
 
+if on F37; then
+  # The delegate exited 0 and the supervisor (still alive) has not reconciled yet: status still running.
+  mkjob f37 running '' 0
+  s1="$(lib eval 'osrc_done_state() { echo not-done; }; _osrc_hub_job_state f37')"
+  s2="$(lib eval 'osrc_done_state() { echo not-done; }; _osrc_hub_lane_job f37' | jq -r .status)"
+  [ "$s1" = 'done?' ] && [ "$s2" = Unverified ] && ok "F37: exit 0 before reconcile reads Unverified, never Done first" || no "F37: state $s1, status $s2"
+  mkjob f37b running '' 3
+  [ "$(lib _osrc_hub_job_state f37b)" = failed ] && ok "F37: a non-zero exit still reads failed" || no "F37: rc 3 reads $(lib _osrc_hub_job_state f37b)"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

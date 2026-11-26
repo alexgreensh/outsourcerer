@@ -70,10 +70,12 @@ _osrc_hub_job_state() {
   local id="$1" jd="$OSRC_JOBS/$1" st rc
   st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null)"
   case "$st" in running|working|live|launching|stalled\?|exploring\?|no-progress-writes)
-    # A supervisor may outlive the delegate whose exit it has already recorded.
+    # A supervisor may outlive the delegate whose exit it has already recorded. Exit 0 is not proof of
+    # done until reconcile has seen the OSRC::DONE marker: unverified, the same as reconcile would say
+    # without it, so a lane never reads Done and then flips back to Unverified.
     if [ -s "$jd/exit" ]; then
       rc="$(cat "$jd/exit" 2>/dev/null)"
-      case "$rc" in 0) st=done ;; ''|*[!0-9]*) : ;; *) st=failed ;; esac
+      case "$rc" in 0) st='done?' ;; ''|*[!0-9]*) : ;; *) st=failed ;; esac
     fi ;;
   esac
   printf '%s' "$st"
