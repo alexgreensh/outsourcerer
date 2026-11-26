@@ -59,6 +59,14 @@ o="$(OSRC_CARD_GUARD=0 CLAUDE_CODE_SESSION_ID=sess-loop timeout 60 bash -c 'OSRC
 grep -q '^EVENT failed supervise .*cannot write the loop marker' <<<"$o" && grep -q '^rc=2' <<<"$o" \
   && ok "EVENT failed supervise, rc 2" || bad "loop marker failure: $o"
 
+echo "=== F27: a slow export keeps its single-flight lock; a follower does not start a second one ==="
+H="$(home f27)"
+o="$(OSRC_HUB_EXPORT_STALE=2 osrc "$H" 'slow() { echo x >> "$OSRC_HOME/runs"; sleep 6; echo "{\"r\":1}"; }
+  _osrc_hub_single_flight k1 slow > "$OSRC_HOME/lead.out" & l=$!
+  sleep 1; f="$(_osrc_hub_single_flight k1 slow)"; wait $l
+  printf "runs=%s follower=%s leader=%s\n" "$(grep -c x "$OSRC_HOME/runs")" "$f" "$(cat "$OSRC_HOME/lead.out")"')"
+[ "$o" = 'runs=1 follower={"r":1} leader={"r":1}' ] && ok "one export ran; the follower printed its result" || bad "single flight: $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"

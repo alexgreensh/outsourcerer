@@ -284,11 +284,12 @@ cmd_hub_export() {
 
 # _osrc_hub_single_flight <key> <cmd...>: one export per key at a time. A caller that finds one in
 # flight waits for it and prints its result (written after the caller arrived) instead of starting
-# a second one. A lock whose leader died, or one older than OSRC_HUB_EXPORT_STALE (60) s whatever pid
-# it records (a SIGKILLed leader's pid can be reused), is taken over along with the leader's temp file;
+# a second one. The leader refreshes the lock's mtime while it runs, so a slow export keeps it. A lock
+# whose leader died, or one not refreshed for OSRC_HUB_EXPORT_STALE (60) s whatever pid it records (a
+# SIGKILLed leader's pid can be reused), is taken over along with the leader's temp file;
 # after OSRC_HUB_EXPORT_WAIT (180) s the caller runs its own export, so a lock never blocks for good.
 _osrc_hub_single_flight() {
-  local key="$1" d="$OSRC_HOME/hub/flight" lk out start pid rc age me m m0 seen=0
+  local key="$1" d="$OSRC_HOME/hub/flight" lk out start pid rc age me m m0 seen=0 beat
   local wait="${OSRC_HUB_EXPORT_WAIT:-180}" stale="${OSRC_HUB_EXPORT_STALE:-60}"; shift
   case "$wait" in ''|*[!0-9]*) wait=180 ;; esac; case "$stale" in ''|*[!0-9]*) stale=60 ;; esac
   lk="$d/$key.lock"; out="$d/$key.json"; start="$(date +%s)"
@@ -303,7 +304,10 @@ _osrc_hub_single_flight() {
     fi
     if mkdir "$lk" 2>/dev/null; then
       printf '%s\n' "$me" > "$lk/pid" 2>/dev/null
+      { while sleep $(( stale / 3 + 1 )) && [ "$(cat "$lk/pid" 2>/dev/null)" = "$me" ] && kill -0 "$me" 2>/dev/null; do
+          touch "$lk" 2>/dev/null; done; } </dev/null >/dev/null 2>&1 & beat=$!
       "$@" > "$out.$me"; rc=$?
+      kill "$beat" 2>/dev/null
       [ "$rc" = 0 ] && [ -s "$out.$me" ] && mv -f "$out.$me" "$out" 2>/dev/null
       [ "$(cat "$lk/pid" 2>/dev/null)" = "$me" ] && rm -rf "$lk" 2>/dev/null   # a lock taken over is not ours
       if [ -f "$out.$me" ]; then cat "$out.$me"; rm -f "$out.$me"; else cat "$out"; fi
