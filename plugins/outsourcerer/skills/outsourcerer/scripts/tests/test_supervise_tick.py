@@ -14,10 +14,10 @@ ROOT = Path(subprocess.check_output(['git', '-C', str(MODULE.parent), 'rev-parse
 class SuperviseTick(unittest.TestCase):
     def test_cadence_and_refresh_guards_detect_mutations(self):
         source = MODULE.read_text()
-        old_check = '''if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''
+        old_check = '''if ! OSRC_HUB_FAST=1 cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''
         mutations = {
-            'producer failure': (old_check, '''cmd_hub_export > "$tmp"; if ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''),
-            'bad json': (old_check, '''if ! cmd_hub_export > "$tmp"; then'''),
+            'producer failure': (old_check, '''OSRC_HUB_FAST=1 cmd_hub_export > "$tmp"; if ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then'''),
+            'bad json': (old_check, '''if ! OSRC_HUB_FAST=1 cmd_hub_export > "$tmp"; then'''),
             'cadence': ('''[ "$last" -eq 0 ] || [ $((now - last)) -ge "$interval" ] || return 0''', ':'),
         }
         for name, (old, new) in mutations.items():

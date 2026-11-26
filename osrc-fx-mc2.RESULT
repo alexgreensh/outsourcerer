@@ -1,0 +1,3 @@
+sha=c36e487339b9e48d61a3d33702c3b53a11642caa
+rc=1
+Conformance (one full run) was red: 257 passed, 9 failed. Six failures were this lane's and are fixed and rerun green; three (test_vocab_hygiene, test_harness_isolation, test_parity_insource_refresh) fail the same way on the base tree here (root ignores read-only files). Head: e112ea1 (this commit carries the RESULT and READY files). tests/test_fx_mc2.sh 55/55. Details: reports/osrc-fx-mc2.md

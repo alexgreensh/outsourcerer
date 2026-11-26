@@ -54,8 +54,12 @@ lib/hub-truth.sh's derive contract that several suites pin, and the gain on this
 the meters.
 
 ## Tests run (exact commands, exit codes)
-Run from `plugins/outsourcerer/skills/outsourcerer/scripts`, each `nice bash tests/<suite>.sh`:
-see the final section for the last run of each and the conformance result.
+From `plugins/outsourcerer/skills/outsourcerer/scripts`, each `nice bash tests/<suite>.sh` (python suites with `python3`):
+
+- `tests/test_fx_mc2.sh` (new, 55 checks): rc 0, 55 passed. Against the base tree its sections fail (12 of the spec F2 checks, 3 of pattern F2, the perf F1/F4 count checks, live F4, etc.).
+- rc 0: test_stall, test_stop_guard, test_watchsvc, test_mc_alive, test_mc_stale_log, test_card_who, test_hub, test_hub_truth, test_hub_mc4, test_hub_speed, test_supervise, test_supervise_lifecycle, test_handover, test_remote_review, test_lane_status, test_proof, test_lane_coord, test_cloudrun, test_p56_r2, test_gemini_catalog, test_resolved_lane, test_cline_lane, test_opencode_lane, test_release_0175 (after keeping hub.html at 998 lines), test_loops, test_lane_accounting, test_cost_disclosure, test_redirect_order, test_quota, test_no_pipe_grep_q, `python3 tests/test_supervise_tick.py`.
+- `bash tests/conformance.sh` (once, at commit 8129829): **rc 1, 257 passed, 9 failed, 14 skipped.** Six of the nine were mine and are fixed since (each rerun alone, rc 0): test_loops, test_lane_accounting, test_cost_disclosure and test_quota (they source a copy of the engine without lib/, so the lane table moved back into the engine's registry section), test_redirect_order (redirect order in hub-lanemeta.sh), test_supervise_tick (its mutation strings now pin the new `OSRC_HUB_FAST=1` export line).
+- Three fail identically on the base tree c36e487 in this container, so they predate this lane: test_vocab_hygiene ("original was damaged on failed write"), test_harness_isolation ("fail-closed failed"), test_parity_insource_refresh ("read-only target"). All three rely on a read-only file or dir refusing a write, and this container runs as root. Conformance was not rerun in full after the fixes.
 
 ## Open questions (decided by the lane)
 - Watcher auto-install (spec F3): not done, by the brief. One notice per session per path (launch, stop guard).
