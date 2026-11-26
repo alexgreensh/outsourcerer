@@ -93,5 +93,25 @@ if on F54; then
   rm -f "$REPO/.outsourcerer.toml"
 fi
 
+if on F55; then
+  # The profile (and the gate script it names) is pinned when the plan first runs: a version landed by a
+  # worker later holds launches for the captain instead of running on this machine.
+  mkplan pin55 't1||scout|0'; mkdir -p "$REPO/scripts"
+  printf '[factory]\ngate = "scripts/gate.sh"\n' > "$REPO/.outsourcerer.toml"
+  printf 'echo x >> "%s/f55.ran"; exit 0\n' "$TMP" > "$REPO/scripts/gate.sh"
+  r1="$(OSRC_FACTORY_ROOT="$REPO" gate "$REPO" pin55)"
+  printf 'echo changed >> "%s/f55.ran"; exit 0\n' "$TMP" > "$REPO/scripts/gate.sh"
+  r2="$(OSRC_FACTORY_ROOT="$REPO" gate "$REPO" pin55)"
+  [ "${r1%% *}" = rc=0 ] && case "$r2" in "rc=1 "*changed*) true ;; *) false ;; esac && [ "$(grep -c changed "$TMP/f55.ran")" = 0 ] \
+    && ok "F55: a gate script changed after the plan started holds launches and is not run" || bad "F55: first=$r1 then=$r2 ran=$(tr '\n' ' ' < "$TMP/f55.ran")"
+  printf '[factory]\ngate = "scripts/gate.sh"\ncheck = "make test"\n' > "$REPO/.outsourcerer.toml"
+  r3="$(OSRC_FACTORY_ROOT="$REPO" gate "$REPO" pin55)"
+  case "$r3" in "rc=1 "*changed*) ok "F55: a changed profile holds too" ;; *) bad "F55: changed profile: $r3" ;; esac
+  rm -f "$OSRC_HOME/plans/pin55/profile.pin"
+  r4="$(OSRC_FACTORY_ROOT="$REPO" gate "$REPO" pin55)"
+  [ "${r4%% *}" = rc=0 ] && ok "F55: the captain accepts the new profile by removing the pin" || bad "F55: after accepting: $r4"
+  rm -rf "$REPO/.outsourcerer.toml" "$REPO/scripts"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
