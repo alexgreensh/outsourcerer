@@ -32,7 +32,7 @@ PY
 rc=$?
 [ -n "${1:-}" ] && exit $rc
 # self-test: a launch from a home with no disk settings is caught
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT; export HOME="$T"
 printf 'H9="$T/h9"; mkdir -p "$H9"\nOSRC_HOME="$H9" bash "$SRC" run -m x "hi"  # outsourcerer.sh\n' > "$T/test_x.sh"
 if bash "$0" "$T" >/dev/null 2>&1; then echo "FAIL: self-test: an unhermetic home was not caught"; exit 1; fi
 echo "PASS: self-test catches a launch home without disk settings"
