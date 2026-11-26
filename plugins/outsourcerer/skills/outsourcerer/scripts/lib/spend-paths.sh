@@ -118,6 +118,8 @@ _osrc_fanout_preflight() {
     [ -z "$m" ] && m="${a_model[$i]}"
     p="${g_prov:-${a_prov[$i]}}"
     case "$seen" in *" ${p:-$PROVIDER}|$m "*) continue ;; esac; seen="$seen${p:-$PROVIDER}|$m "
+    # local lanes never spend (the same short-circuit fanout's cloud pre-ack uses)
+    case "${p:-$PROVIDER}:$m" in local:*|*:ollama:*|*:lmstudio:*|*:lms:*|*:local|*:local:*) continue ;; esac
     local -a _pf_provider=() _pf_spend=() _pf_args=("$verb")
     { [ -n "$p" ] || [ "${PROVIDER_EXPLICIT:-0}" = 1 ]; } && _pf_provider=(--provider "${p:-$PROVIDER}")
     [ "$flag" = 1 ] && _pf_spend=(--spend-ok)

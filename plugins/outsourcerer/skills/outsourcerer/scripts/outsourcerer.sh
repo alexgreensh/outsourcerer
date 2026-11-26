@@ -12417,7 +12417,7 @@ $body"
     done
   fi
 
-  _osrc_fanout_preflight "$verb"; local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
+  local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$gd" fanout "$gid" "$PWD" || true
   printf 'provider=%s verb=%s max=%s model=%s effort=%s tier=%s with=[%s] count=%s cwd=%s\n' \
     "${g_prov:-$PROVIDER}" "$verb" "$maxpar" "${g_model:-<per-agent|default>}" "${g_effort:-<per-agent|lane>}" "${g_tier:-<auto>}" "${fwd[*]-}" "${#labels[@]}" "$PWD" > "$gd/manifest.txt"
@@ -12508,7 +12508,7 @@ $body"
     fi
   done
 
-  local i jid em ee et ep jprov rtag
+  _osrc_fanout_preflight "$verb"; local i jid em ee et ep jprov rtag   # spend/cap/route, once per pair, before any job
   local -a jfwd=(); local _fail=0 _ok=0
   for i in "${!labels[@]}"; do
     while [ "$(_fanout_running "$gid")" -ge "$maxpar" ]; do sleep "${OSRC_POLL:-10}"; done
