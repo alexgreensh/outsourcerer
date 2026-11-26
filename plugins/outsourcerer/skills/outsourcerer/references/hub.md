@@ -127,7 +127,10 @@ To publish it as an artifact, the orchestrator:
 4. Publishes `assets/hub-home.js` and `assets/hub-decide.js` next to the page (with the
    fonts) when it publishes `hub.html` itself.
 
-Answer docs are `<project-slug>--<decision-id>` with `{choice, note, at}`. `choice` may be
+Answer docs are `<owner-session>--<decision-id>` with `{project: <owner-session>, choice, note, at}`.
+The owner is the session that asked: on a card that merges several sessions (one project), each
+decision carries its `owner`, and the answer is keyed by that owner, not by the card's id. An
+orchestrator reads its answers under its own session id. `choice` may be
 empty when the viewer typed their own answer in `note` (one of the two always carries text).
 A half-typed answer survives every poll and re-render: the page keeps a per-decision draft
 (choice, text, focus, caret) and holds re-renders during IME composition and an in-flight send.
@@ -187,7 +190,8 @@ only when it is worth it: the export is skipped when no file under `jobs`,
 `hub`, `owners`, `remote`, or `rate-limits.json` changed since the last run,
 and the loop stops entirely once no page has polled for `OSRC_HUB_IDLE_SECS`
 (default 5 minutes — an idle dashboard costs no CPU). The page polls every 15s.
-Answers POST to `$OSRC_HOME/hub/answers/<slug>--<id>.json` — the same files
+Answers POST to `$OSRC_HOME/hub/answers/<owner-session>--<id>.json` (the session that asked the
+decision, which on a merged card is not the card's slug) — the same files
 artifact mode writes, so an orchestrator reading that directory sees local-mode
 answers too.
 
@@ -202,10 +206,12 @@ token if `/dev/urandom` is unreadable.
 
 **Never looks dead (0.17, `lib/hub-assets/hub-alive.js`, `lib/mc_alive.sh`).** A strip at the top always
 says whether the page is live: `Live · updated 12s ago`, or the reason a call failed with the age of the
-last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: this tab's key is from an
-older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
+last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: export failing since
+14:05` (the hub answers but its exports fail: it sends `export_error` and `export_error_since`), or
+`Starting: showing the last saved state` (a restarted hub serving its last `export.json`, `warming`),
+or `Not live: this tab's key is from an older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
 POSTs the tab's old key to `/reopen`. The hub keeps salted SHA-256 hashes of the keys it served in
-`hub/keys.json` (0600, newest 5, a retired key is honoured for 7 days) and answers with the current page
+`hub/keys.json` (0600, newest 5, a retired key is honoured for 12 hours, and only to a same-origin browser request) and answers with the current page
 URL only for a key it retired; no key, an unknown key or the current key gets 403 and the "run outsourcerer
 mc" text. `GET /reopen` is always 403. The strip also lists needs-you rows from the export (`alerts`: a lane
 still stalled after its autonudge, a READY lane queued 15+ min with its age) and `No watcher for N min`

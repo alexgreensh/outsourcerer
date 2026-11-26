@@ -472,18 +472,14 @@ _ff_verdict() {
   _FF_VERDICT_LINE="$(printf '%s' "$line" | cut -c1-200)"
   [[ "$line" =~ $re ]] || return 0
   word="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[2]}"
+  # Any earlier verdict-looking line that says the other word contradicts the final one. Captured, then
+  # matched: `grep | grep -q` under pipefail SIGPIPEs the middle grep on a long quote and reads "no".
+  local vl; vl="$(tr -d '\r' < "$f" | grep -E '^[[:space:]>*#`_-]*VERDICT[[:space:]]*:')"
   if [ "$word" = PASS ]; then
-    case "$rest" in *FAIL*) _FF_VERDICT=ambiguous; return 0 ;; esac
-    # Any earlier verdict-looking line that says FAIL contradicts the final PASS.
-    if tr -d '\r' < "$f" | grep -E '^[[:space:]>*#`_-]*VERDICT[[:space:]]*:' | grep -q 'FAIL'; then
-      _FF_VERDICT=ambiguous; return 0
-    fi
+    case "$rest$vl" in *FAIL*) _FF_VERDICT=ambiguous; return 0 ;; esac
     _FF_VERDICT=pass
   else
-    case "$rest" in *PASS*) _FF_VERDICT=ambiguous; return 0 ;; esac
-    if tr -d '\r' < "$f" | grep -E '^[[:space:]>*#`_-]*VERDICT[[:space:]]*:' | grep -q 'PASS'; then
-      _FF_VERDICT=ambiguous; return 0
-    fi
+    case "$rest$vl" in *PASS*) _FF_VERDICT=ambiguous; return 0 ;; esac
     _FF_VERDICT=fail
   fi
 }
@@ -569,7 +565,8 @@ _ff_verify() {
      && [ -z "$(printf '%s' "$t" | _ff_jq -r '.flow.name // ""')" ] && ! _ff_is_land_target "$tasks" "$tid"; then
     if _ff_out_of_time; then
       printf '  %s: not landed: time cap reached; land it with: %s\n' "$tid" "$(_ff_cmd "$plan" land "$tid")"
-      _task_update "$plan" "$tid" '.land_error = "not landed before the time cap"' >/dev/null 2>&1
+      # The captain was told to land it by hand: no automatic landing is left pending behind that.
+      _task_update "$plan" "$tid" '.land_error = "not landed before the time cap" | .auto_land_pending = false' >/dev/null 2>&1
       return 0
     fi
     _ff_auto_land "$plan" "$tid"

@@ -83,8 +83,8 @@ out="$( calm; OSRC_FACTORY_GATE="$TMP/gate.sh" cmd_plan_run gated --once 2>&1 )"
 [ "$(st gated t1)" = todo ] && grep -q 'failed (rc=7); holding this pass' <<<"$out" && ok "L5: a broken gate fails closed: holds the pass, names the rc" || bad "L5 broken gate: $out"
 ( calm; OSRC_FACTORY_GATE="$TMP/gate.sh"; printf '#!/bin/sh\nexit 0\n' > "$TMP/gate.sh"; cmd_plan_run gated --once >/dev/null 2>&1 )
 [ "$(st gated t1)" != todo ] && ok "L5: once the gate answers 0 the held plan launches (no wedge)" || bad "L5 gate fixed but plan still held"
-out="$( calm; OSRC_FACTORY_GATE="/x/g.sh --fast"; _osrc_fp_gate_can_run 2>&1; _osrc_fp_gate_can_run 2>&1 )"; r1=$?
-[ "$r1" = 0 ] && [ "$(grep -c 'is not a file' <<<"$out")" = 1 ] && ok "L5: a gate that is not a file is ignored with one warning" || bad "L5 gate warn r=$r1 $out"
+out="$( calm; OSRC_FACTORY_GATE="/x/g.sh --fast"; _osrc_fp_gate_can_run 2>&1; echo "rc=$? $_OSRC_FP_GATE_REASON" )"
+case "$out" in "rc=1 "*"is not a file"*) ok "L5: a gate that is not a file holds launches (fails closed, release review F54)" ;; *) bad "L5 missing gate: $out" ;; esac
 ( calm; unset -f _osrc_fp_load1 _osrc_fp_ncpu osrc_mac_load; _osrc_fp_ncpu() { :; }; _osrc_fp_gate_can_run 2>/dev/null ) && ok "L5: missing load/swap readings never pause launches" || bad "L5: a missing reading paused launches"
 ( calm; unset -f _osrc_disk_gate; _osrc_fp_gate_can_run 2>/dev/null ) && bad "L5: a missing disk gate let a pass launch" || ok "L5: a missing disk gate holds the pass"
 # A loaded Mac on its usual high swap ratio still launches; only its own threshold pauses (P2 4).

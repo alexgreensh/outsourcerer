@@ -20,9 +20,9 @@
 _OSRC_HUB_DERIVE_JQ='
 def dcat: if (.status // "") | IN("Merged", "Shipped") then "merged"
   elif .status == "Failed" or .state == "failed" then "failed"
-  elif .status == "Canceled" then "canceled"
+  elif (.status // "") | IN("Canceled", "Closed") then "canceled"
   elif (.status // "") | IN("Unverified", "Paused", "Can\u0027t check") then "blocked"
-  elif .status == "Review" then "ready"
+  elif (.status // "") | IN("Review", "Approved") then "ready"
   elif .status == "Done" or .state == "done" then "done"
   elif .status == "Blocked" or ((.state // "") | IN("approval", "question", "limit")) then "blocked"
   elif .status == "Idle" or .state == "idle" then "idle"

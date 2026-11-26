@@ -49,7 +49,7 @@ PY
   mkdir -p "$OSRC_JOBS/lane"
   _reconcile_status() { echo running; }
   echo 0 > "$OSRC_JOBS/lane/exit"
-  [ "$(_osrc_hub_job_state lane)" = done ]
+  [ "$(_osrc_hub_job_state lane)" = "done?" ]   # exit 0 before reconcile saw the marker: unverified (F37)
   echo 1 > "$OSRC_JOBS/lane/exit"
   [ "$(_osrc_hub_job_state lane)" = failed ]
 )

@@ -85,8 +85,8 @@ slow() { ( unset CLAUDE_CODE_SESSION_ID OUTSOURCERER_DEPTH; OSRC_SOURCED=1; . "$
   done ) | jq -sc 'map({id, status, state}) | sort_by(.id)'; }
 fast() { jq -c '[.projects[] | select(.id == "s-main") | .lanes[] | {id, status, state}] | sort_by(.id)' <<<"$1"; }
 want="$(slow)"; [ ! -e "$TMP/probe-ran.c-3" ] || no "the uncached readers started a probe"
-t0="$(date +%s)"; e1="$(OSRC_HUB_PROF="$TMP/prof1" lib cmd_hub_export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
-got1="$(fast "$e1")"; e2="$(lib cmd_hub_export 2>/dev/null)"; got2="$(fast "$e2")"
+t0="$(date +%s)"; e1="$(OSRC_HUB_FAST=1 OSRC_HUB_PROF="$TMP/prof1" lib cmd_hub_export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))   # the serve loop (a one-shot export asks contracts now: F42)
+got1="$(fast "$e1")"; e2="$(OSRC_HUB_FAST=1 lib cmd_hub_export 2>/dev/null)"; got2="$(fast "$e2")"
 [ "$(jq length <<<"$want")" = 9 ] && [ "$got1" = "$want" ] && [ "$got2" = "$want" ] \
   && ok "9 lanes: first and repeat export match the uncached readers" || no "lane states differ: slow=$want first=$got1 repeat=$got2"
 jq -e 'map(select(.id == "c-1"))[0].state == "done" and map(select(.id == "c-3"))[0].state == "working"' >/dev/null <<<"$got1" \
@@ -99,26 +99,26 @@ jq -e 'map(select(.id == "t-ask"))[0].state == "question" and map(select(.id == 
   && ok "40 dead owner records skip the lane builders; a review-item lane and a pane still reach them" \
   || no "lane builders per id: gone=$(grep -c ' lane\.gone-' "$TMP/prof1") rv-only=$(grep -c ' lane\.rv-only\.for$' "$TMP/prof1") t-idle=$(grep -c ' lane\.t-idle\.for$' "$TMP/prof1")"
 
-echo "=== probe: a 60 s clone check never holds the export ==="
+echo "=== probe: a 60 s clone check never holds the serve loop's export ==="
 [ "$dt" -lt 40 ] && ok "export with two 60 s probes took ${dt}s" || no "export waited on the probe: ${dt}s"
 n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -e "$TMP/probe-ran.c-3" ] && ok "the probe still runs, detached, after the export" || no "the deferred probe never ran"
 # The probe's own shell must not hold the caller's pipe either: a capture of the whole engine returns.
 t0="$(date +%s)"; rm -f "$OSRC_HOME"/done/*.checkcache "$OSRC_HOME"/done/*.checklock "$TMP"/probe-ran.* 2>/dev/null; rm -rf "$OSRC_HOME"/done/*.checklock*
-out="$(bash "$SRC" hub export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
+out="$(OSRC_HUB_FAST=1 bash "$SRC" hub export 2>/dev/null)"; dt=$(( $(date +%s) - t0 ))
 [ "$dt" -lt 40 ] && jq -e '.projects | length > 0' >/dev/null <<<"$out" && ok "\$(outsourcerer hub export) returns in ${dt}s while probes run" || no "captured export took ${dt}s"
 n=0; while [ ! -e "$TMP/probe-ran.c-3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n + 1)); done
 [ -e "$TMP/probe-ran.c-3" ] && ok "the captured export's own worker ran the probe" || no "the captured export never ran the deferred probe"
 pkill -f "probe-ran" 2>/dev/null; pkill -f "$OSRC_HOME/cloud/c-" 2>/dev/null
 
-echo "=== pr: a merged PR reads done one export after its last verdict, and only then ==="
+echo "=== pr: under hub serve, a merged PR reads done one export after its last verdict, and only then ==="
 mkdir -p "$TMP/ghbin"; printf '#!/bin/sh\ncase "$*" in "pr view"*) : > "%s/gh-pr-asked"; echo "{\\"state\\":\\"MERGED\\"}" ;; *) exit 1 ;; esac\n' "$TMP" > "$TMP/ghbin/gh"; chmod +x "$TMP/ghbin/gh"
 own c-5; printf '{"id":"c-5","branch":"b5","repo":"example/garden","url":"https://example.invalid/g.git","head":"abc5","head_msg":"wip","head_ready":false,"created_ts":%s,"check":null}\n' "$NOW" > "$OSRC_HOME/remote/c-5.json"
 printf '{"spec":"pr:example/garden#7","cwd":"%s"}\n' "$TMP" > "$OSRC_HOME/done/c-5.json"; printf '%s not-done\n' "$((NOW - 3600))" > "$OSRC_HOME/done/c-5.checkcache"
-p1="$(PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"
+p1="$(OSRC_HUB_FAST=1 PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"
 s1="$(fast "$p1" | jq -r 'map(select(.id == "c-5"))[0].state')"
 n=0; while ! grep -q ' done' "$OSRC_HOME/done/c-5.checkcache" 2>/dev/null && [ "$n" -lt 100 ]; do sleep 0.1; n=$((n + 1)); done
-s2="$(PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"; s2="$(fast "$s2" | jq -r 'map(select(.id == "c-5"))[0].state')"
+s2="$(OSRC_HUB_FAST=1 PATH="$TMP/ghbin:$PATH" lib cmd_hub_export 2>/dev/null)"; s2="$(fast "$s2" | jq -r 'map(select(.id == "c-5"))[0].state')"
 [ "$s1" = working ] && [ -e "$TMP/gh-pr-asked" ] && [ "$s2" = done ] && ok "pr: export shows the last verdict (working), its worker asks gh, the next export shows done" || no "pr: lag: first=$s1 asked=$([ -e "$TMP/gh-pr-asked" ] && echo y || echo n) next=$s2"
 rm -f "$OSRC_HOME/remote/c-5.json" "$OSRC_HOME/done/c-5".* "$OSRC_HOME/owners/s-main/c-5"
 pkill -f "$OSRC_HOME/cloud/c-" 2>/dev/null

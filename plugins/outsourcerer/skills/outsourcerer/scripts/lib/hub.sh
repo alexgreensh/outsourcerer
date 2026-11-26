@@ -73,7 +73,7 @@ _osrc_hub_lane_status() {
   local raw="$1" rv="$2" extra="${3:-}"
   local st="$raw"
   case "$rv" in
-    MERGE) st="Merged" ;;
+    MERGE) st="Approved" ;; LANDED) st="Merged" ;;   # a verdict approves; only evidence of a merge says Merged
     BLOCK) st="Blocked" ;;
     CHANGES) st="Building"; extra="${extra:+$extra; }changes requested by review" ;;
   esac
@@ -87,7 +87,7 @@ _osrc_hub_lane_status() {
     failed|wedged|timeout) st="Failed" ;;
     canceled|interrupted) st="Canceled" ;;
     gone) st="" ;;
-    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused) : ;;
+    Merged|Approved|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused|Closed) : ;;
     *) st="Building" ;;
   esac
   local pct=""
@@ -112,8 +112,7 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   [ -f "$jd/worktree.json" ] && { wt="${wt:-$(jq -r '.path // ""' "$jd/worktree.json" 2>/dev/null)}"; br="${br:-$(jq -r '.branch // ""' "$jd/worktree.json" 2>/dev/null)}"; }
   reason="$(head -1 "$jd/reason" 2>/dev/null)"
   ds="$(_osrc_hub_done_state "$id")"
-  [ "$ds" = "done" ] && st="done"
-  case "$st:$reason" in done:exited-0-without-OSRC-DONE*) st='done?' ;; esac   # exit 0 is not proof of done
+  if [ "$ds" = done ]; then st=done; else case "$st:$reason" in done:exited-0-without-OSRC-DONE*) st='done?' ;; esac; fi   # a verified contract wins; exit 0 alone is no proof
   _osrc_hub_paused "$id" "$st" && st=paused
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "${reason:-$st}")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; note="${mapped#*|}"
@@ -189,7 +188,7 @@ _osrc_hub_lane_remote() { # <id> -> lane json or nothing
   fi
   local raw="$st"
   [ "$st" = "ready" ] && [ -n "$rv" ] && raw="verdict-$rv"
-  [ "$st" = "done" ] && [ -z "$rv" ] && rv="MERGE"
+  ! type _osrc_hub_landed >/dev/null 2>&1 || ! _osrc_hub_landed "$id" "$head" || rv=LANDED   # never inferred from done
   mapped="$(_osrc_hub_lane_status "$raw" "$rv" "${msg:+$msg}${head7:+ @${head7}}")"
   # the last poll failed: what the card shows is stale, say so instead of Building
   [ "$st" != live ] || [ -z "$perr" ] || mapped="Can't check||can't check the branch: $perr"
@@ -240,7 +239,7 @@ _osrc_hub_lane_for_raw() {
   local id="$1" rmap="$2"
   if [ -f "$OSRC_HOME/remote/$id.json" ]; then _osrc_hub_lane_remote "$id" && return 0; fi
   if [ -d "$OSRC_JOBS/$id" ]; then
-    local lj; lj="$(_osrc_hub_lane_job "$id")" && { local rv; rv="$(_osrc_hub_review_verdict "$id" "$rmap")"; if [ -n "$rv" ]; then lj="$(jq -c --arg rv "$rv" '.status = (if $rv=="MERGE" then "Merged" elif $rv=="BLOCK" then "Blocked" else .status end) + {pct:(if $rv=="MERGE" then 100 else .pct end)}' <<<"$lj")"; fi; printf '%s' "$lj"; return 0; }
+    local lj; lj="$(_osrc_hub_lane_job "$id")" && { local rv; rv="$(_osrc_hub_review_verdict "$id" "$rmap")"; if [ -n "$rv" ]; then [ "$rv" != MERGE ] || ! type _osrc_hub_landed >/dev/null 2>&1 || ! _osrc_hub_landed "$id" || rv=LANDED; lj="$(jq -c --arg rv "$rv" 'if $rv == "LANDED" then . + {status: "Merged", pct: 100} elif $rv == "MERGE" then .status = "Approved" | del(.pct) elif $rv == "BLOCK" then .status = "Blocked" | del(.pct) else . end' <<<"$lj")"; fi; printf '%s' "$lj"; return 0; }
   fi
   _osrc_hub_lane_session "$id" && return 0
   _osrc_hub_lane_fallback "$id"
@@ -256,7 +255,7 @@ _osrc_hub_decisions() {
     | map(. + {id:(.id // ""), status:(.status // "wait"), weight:(.weight // "Medium"),
                options:(.options // []), affects:(if (.affects | type) == "array" then .affects elif (.affects | type) == "string" then [.affects] else [] end), q:(.q // .short // ""),
                short:(.short // .q // "")})
-    | to_entries | map(.value + {id:(.value.id // ("D" + ((.key+1)|tostring)))}) | map(del(.key))' \
+    | to_entries | map((.value.id // "") as $i | .value + {id:(if $i == "" then "D\(.key + 1)" else $i end)})' \
     "$f" 2>/dev/null || printf '[]'
 }
 
@@ -312,7 +311,7 @@ _osrc_hub_build_project() {
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.done"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
       if [ "${act##* }" = 1 ] && ! jq -e '.state == "idle" or .state == "done" or .state == "failed" or
-          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped", "Unverified"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
+          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped", "Unverified", "Closed"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
     done
   fi
   [ -z "$olanes" ] || lanes="$(printf '%s' "$olanes" | jq -cs . 2>/dev/null)" || lanes='[]'   # one jq, not one per lane
@@ -357,7 +356,7 @@ _osrc_hub_build_project() {
   type _osrc_hub_sessions_total >/dev/null 2>&1 && stot="$(_osrc_hub_sessions_total "$slug")"
   case "$stot" in ''|*[!0-9]*) stot=0 ;; esac
   # Card fields are read inside this one jq (they were eight jq calls): `s` is what `jq -r '.x // ""'`
-  # printed, so values keep their old text form; an order that is not a number still fails the build.
+  # printed, so values keep their old text form; an order that is not a number reads 99.
   out="$(jq -cn \
     --arg id "$slug" --arg name "$name" --arg upd "$upd" \
     --arg upda "$upda" --argjson live "$llive" --argjson staleHours "$stale_hours" \
@@ -366,13 +365,13 @@ _osrc_hub_build_project() {
     --argjson now "$now" --argjson lanes "$lanes" --argjson decs "$decs" \
     --argjson card "$card" --argjson derived "$derived" '
     def s: (. // "") | if type == "string" then sub("\n+$"; "") else tojson end;
-    ($card.order // 99 | if type == "string" then fromjson else . end) as $order
+    ($card.order // 99 | if type == "number" then . elif type == "string" then (tonumber? // 99) else 99 end) as $order
     | ($card.status | s) as $status | ($card.pct | s) as $pct | ($card.eta | s) as $eta | ($card.etaNote | s) as $etanote
     | ($card.tagline | s) as $tagline | ($card.repo | s) as $repo
     | ($card.reportedAt | s | if . == "" and $pmt > 0 then ($pmt | todate) else . end) as $rep_at
     | {id:$id, name:$name, order:$order, updated:$upd, exported_at:$now, lanes:$lanes, decisions:$decs,
      liveLanes:$live, staleHours:$staleHours, cardStaleMin:$cardStaleMin, decisionStaleH:$decisionStaleH, sessionsTotal:$stot,
-     sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
+     sessionsRun:$stot, sessionsNow:([$lanes[]? | select(((.status // "") | test("^(done|merged|approved|shipped|canceled|cancelled|failed|stopped|idle|closed)$"; "i") | not) and ((.state // "") != "idle"))] | length)}
     + (if $upda=="" then {} else {updatedAt:$upda} end)
     + (if $rep_at=="" then {} else {reportedAt:$rep_at} end)
     + (if $folder=="" then {} else {folder:$folder} end)
@@ -511,7 +510,7 @@ _osrc_hub_lane_activity() {
   b="$(_osrc_hub_mt "$OSRC_JOBS/$id"/* "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/review/items/$id"-*.json "$OSRC_HOME/autodetach/$id.log" "$OSRC_HOME/autodetach/$id.rc")"
   if [ -d "$OSRC_JOBS/$id" ]; then
     st="$(_osrc_hub_job_state "$id")"
-    case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
+    case "$st" in running|live|working|launching|exploring\?) live=1 ;; esac   # stalled?, no-progress-writes: not activity
   elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
     type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
   elif have tmux 2>/dev/null && ta="$(_osrc_hub_tmux_row "$id")" && [ -n "$ta" ]; then
@@ -812,8 +811,9 @@ _osrc_hub_export_run() {
     [ -n "$slug" ] || continue
     [ -n "$proj" ] && [ "$slug" != "$proj" ] && continue
     type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "proj.$slug.start"
-    local pj; pj="$(_osrc_hub_build_project "$slug" "$now" "$upd")" || continue
-    [ -n "$pj" ] || continue
+    _osrc_hub_slug_ok "$slug" || continue
+    local pj; pj="$(_osrc_hub_build_project "$slug" "$now" "$upd")"   # a failed build is listed, never dropped (lib/hub-safe.sh)
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$pj" || pj="$(_osrc_hub_stub_project "$slug" "$now" "$upd" "this project could not be read in this export; its lanes are not shown")"
     # Full listing: working orchestrator sessions only. --project still answers for any slug.
     [ -n "$proj" ] || _osrc_hub_visible "$slug" "$pj" || continue
     if [ -z "$(jq -r '.name // ""' "$OSRC_HOME/hub/projects/$slug.json" 2>/dev/null)" ]; then
@@ -829,7 +829,7 @@ _osrc_hub_export_run() {
   # One card per project, then live evidence vs reports (lib/hub-truth.sh).
   [ -n "$proj" ] || ! type _osrc_hub_group >/dev/null 2>&1 || projects="$(_osrc_hub_group "$projects")"
   if type _osrc_hub_truth >/dev/null 2>&1; then
-    projects="$(jq -c '.[]' <<<"$projects" | while IFS= read -r pj; do _osrc_hub_truth "$pj" "$now"; printf '\n'; done | jq -cs 'map(del(._hasStatus))')"
+    projects="$(jq -c '.[]' <<<"$projects" | while IFS= read -r pj; do _osrc_hub_truth_safe "$pj" "$now"; done | jq -cs 'map(del(._hasStatus))')"
   fi
   if [ -z "$proj" ]; then
     local uj; uj="$(_osrc_hub_unowned_project "$now" "$upd")"
@@ -840,7 +840,7 @@ _osrc_hub_export_run() {
   fi
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "projects.done"
   local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
-  case "$limits" in ''|*'error'*) limits='[]' ;;esac; ! type _osrc_hub_limits_fresh >/dev/null 2>&1 || limits="$(_osrc_hub_limits_fresh <<<"$limits")"   # renews from renews_at, now
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$limits" || limits='[]'; ! type _osrc_hub_limits_fresh >/dev/null 2>&1 || limits="$(_osrc_hub_limits_fresh <<<"$limits")"   # renews from renews_at, now
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "limits.done"
   # Re-read the queued stale screens in ONE detached worker: off the export's clock and off its
   # tmux queue. Fork now, while the memoised raw reader still exists.
@@ -930,7 +930,7 @@ cmd_hub_serve() {
 }
 
 # cmd_hub_mc: `mc` / `mission-control`, the open-the-page command. It reuses a hub that already serves this
-# OSRC_HOME (its token answers /api/answers on 8788-8798), else starts one detached, opens the page and
+# OSRC_HOME (it proves it holds the token: _osrc_hub_mc_find), else starts one detached, opens the page and
 # returns. Before 0.16.4 `mc` ran `hub serve` in the foreground: it never returned, and with 8788 taken it
 # quietly started a second server. `mc serve ...` (or any serve flag) still runs the server in front.
 cmd_hub_mc() {
@@ -940,22 +940,8 @@ cmd_hub_mc() {
   local dir="${_OSRC_FACTORY_DIR:-$SCRIPT_DIR}"
   [ -f "$tokf" ] && [ ! -L "$tokf" ] && tok="$(tr -d ' \n' <"$tokf" 2>/dev/null)"
   case "$tok" in *[!0-9a-fA-F]*) tok="" ;; esac
-  if [ "${#tok}" -eq 32 ] && command -v curl >/dev/null 2>&1; then
-    # The port this OSRC_HOME's hub last recorded, then an explicit OSRC_HUB_PORT, then the fixed
-    # 8788-8798 scan: a `hub serve --port N` / OSRC_HUB_PORT hub lives outside the scan but is still
-    # ours. The token gates every probe, so a stale record or a foreign server just misses.
-    local plist="" sp p2
-    sp="$(jq -r '.port // empty' "$OSRC_HOME/hub/serve.json" 2>/dev/null)"
-    case "$sp" in ''|*[!0-9]*) ;; *) plist="$sp" ;; esac
-    case "${OSRC_HUB_PORT:-}" in ''|*[!0-9]*) ;; *) plist="${plist:+$plist }${OSRC_HUB_PORT}" ;; esac
-    for p2 in 8788 8789 8790 8791 8792 8793 8794 8795 8796 8797 8798; do
-      case " $plist " in *" $p2 "*) ;; *) plist="$plist $p2" ;; esac
-    done
-    for p in $plist; do
-      [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' -H "X-Hub-Token: $tok" "http://127.0.0.1:$p/api/answers" 2>/dev/null)" = 200 ] \
-        && { url="http://127.0.0.1:$p/?t=$tok"; break; }
-    done
-  fi
+  # Our hub proves itself without the token (lib/hub-safe.sh): a stranger on a probed port never gets it.
+  if [ "${#tok}" -eq 32 ] && p="$(_osrc_hub_mc_find "$tok")"; then url="http://127.0.0.1:$p/?t=$tok"; fi
   # A live hub is reused only when it runs THIS engine: an older install's server (or another
   # checkout's) answers the token probe and keeps serving old code and old bugs (0.17.5).
   # _osrc_mc_stale_hub kills only a process verified as this OSRC_HOME's hub server.
@@ -992,4 +978,5 @@ cmd_hub() {
 # helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
 type _osrc_hub_truth >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-truth.sh" ] && . "$_osrc_hub_d/hub-truth.sh"; unset _osrc_hub_d; }
 type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }
+type _osrc_hub_stub_project >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-safe.sh" ] && . "$_osrc_hub_d/hub-safe.sh"; unset _osrc_hub_d; }
 type _osrc_hub_job_state >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanemeta.sh" ] && . "$_osrc_hub_d/hub-lanemeta.sh"; unset _osrc_hub_d; }

@@ -325,6 +325,9 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
   # than forked here: live pane reads hammering the tmux server mid-export stall the export's own
   # tmux calls. Screen state is a display input; supervise confirms quiet lanes on its own cadence.
   printf '%s %s\n' "$id" "$act" >> "$OSRC_HOME/hub/cache/scr/.wanted.$$" 2>/dev/null
+  # A minute or more old: the lane says "state from N min ago" (_osrc_hub_lane_live_fields), so an
+  # answered approval or a dead pane is not shown as current while its refresh keeps failing.
+  [ $(( now - ep )) -lt 60 ] || [ -z "${_OSRC_HUB_MEMO:-}" ] || { mkdir -p "$_OSRC_HUB_MEMO/scrage" && printf '%s\n' "$(( (now - ep) / 60 ))" > "$_OSRC_HUB_MEMO/scrage/$id"; } 2>/dev/null
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "scr.$id.swr"
   tail -n +2 "$pf" 2>/dev/null
 }
@@ -367,9 +370,22 @@ _osrc_hub_scr_flush_wanted() {
       rmdir "$pf.lock" 2>/dev/null
     done < "$wf" 2>/dev/null
     # Queued done-contract probes (lib/hub-perf.sh): the real reader spawns/refreshes each verdict cache.
-    while read -r id; do
-      [ -n "$id" ] && _osrc_hub_rawosrc_done_state "$id" >/dev/null 2>&1
-    done < "$dwf" 2>/dev/null
+    # One probe worker at a time (.dlock + its pid): with slow check: commands and exports every 25-30 s,
+    # workers piled up and ran the same check side by side. A busy worker means skip: the next export
+    # queues the ids again. A lock whose pid is gone is a killed worker's and is broken.
+    local dl="$OSRC_HOME/hub/cache/scr/.dlock" op="" got=0
+    if mkdir "$dl" 2>/dev/null; then got=1
+    else
+      IFS= read -r op 2>/dev/null < "$dl/pid"
+      case "$op" in ''|*[!0-9]*) ;; *) kill -0 "$op" 2>/dev/null || { rm -rf "$dl"; mkdir "$dl" 2>/dev/null && got=1; } ;; esac
+    fi
+    if [ "$got" = 1 ]; then
+      sh -c 'echo "$PPID"' > "$dl/pid" 2>/dev/null   # this worker's pid (bash 3.2 has no BASHPID)
+      while read -r id; do
+        [ -n "$id" ] && _osrc_hub_rawosrc_done_state "$id" >/dev/null 2>&1
+      done < "$dwf" 2>/dev/null
+      rm -rf "$dl" 2>/dev/null
+    fi
     rm -f "$wf" "$dwf" 2>/dev/null
   ) </dev/null >/dev/null 2>&1 &
   return 0

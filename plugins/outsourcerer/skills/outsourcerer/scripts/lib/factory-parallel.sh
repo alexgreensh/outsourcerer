@@ -6,7 +6,7 @@
 #   - launch cap: --max-parallel, else OSRC_FACTORY_PARALLEL, else the profile's parallel, else a
 #     default from the CPU count (3; 2 on <=4 cores; 1 on <=2 cores). Whole number 1-16.
 #   - resource gate: before each launch pass. Profile `gate`/OSRC_FACTORY_GATE names a script run as
-#     `<gate> can-run` (rc1 pauses; other failures fail open). Built in: the launch path's own disk
+#     `<gate> can-run` (rc1 pauses; any other failure, a missing script included, holds too). Built in: the launch path's own disk
 #     gate (_osrc_disk_gate, cleanup ack included), 1-minute load per core over OSRC_FACTORY_LOAD_MAX
 #     (2), and on macOS swap use over OSRC_FACTORY_SWAP_MAX_PCT (off by default). OSRC_FACTORY_GATE=off turns every
 #     gate off. A gate only delays launches; it never fails a task.
@@ -138,19 +138,24 @@ _osrc_fp_over() {
 
 # _osrc_fp_gate_can_run -> rc0 when new launches may proceed this pass. rc1 sets _OSRC_FP_GATE_REASON,
 # which names the reading and the setting that tunes it. A repo resource gate fails closed: any rc
-# but 0 (a "no", a crash, a missing interpreter) or a run past OSRC_FACTORY_GATE_TIMEOUT (30s) holds
-# this pass, and the next pass asks again, so a broken gate holds launches without wedging the plan.
+# but 0 (a "no", a crash, a missing interpreter), a named gate that is not a file, a relative gate with
+# no repo root to resolve it, or a run past OSRC_FACTORY_GATE_TIMEOUT (30s) holds this pass, and the next
+# pass asks again, so a broken gate holds launches without wedging the plan. With a plan, the repo
+# profile and its gate script must still be the ones the plan first ran with (_osrc_fp_profile_pin).
 # The disk check asks the launch gate in probe mode (no override taken or minted). A missing load or
 # swap reading counts as "go".
-_OSRC_FP_GATE_REASON=""; _OSRC_FP_GATE_WARNED=""
-_osrc_fp_gate_can_run() {
+_OSRC_FP_GATE_REASON=""
+_osrc_fp_gate_can_run() {   # [plan]
   local g root out rc n l lpc s
   _OSRC_FP_GATE_REASON=""
   g="${OSRC_FACTORY_GATE:-}"
   [ "$g" = off ] && return 0
+  [ -z "${1:-}" ] || _osrc_fp_profile_pin "$1" || return 1
   [ -n "$g" ] || g="$(_osrc_fp_get factory gate)"
   if [ -n "$g" ]; then
-    case "$g" in /*) ;; *) root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" && g="$root/$g" ;; esac
+    case "$g" in /*) ;; *)
+      root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" || { _OSRC_FP_GATE_REASON="resource gate $g is a relative path and there is no repo root to find it in; holding launches until it names a script"; return 1; }
+      g="$root/$g" ;; esac
     if [ -f "$g" ]; then
       if [ -x "$g" ]; then out="$(_timeout "${OSRC_FACTORY_GATE_TIMEOUT:-30}" "$g" can-run)"; rc=$?
       else out="$(_timeout "${OSRC_FACTORY_GATE_TIMEOUT:-30}" sh "$g" can-run)"; rc=$?; fi
@@ -161,9 +166,8 @@ _osrc_fp_gate_can_run() {
         124) _OSRC_FP_GATE_REASON="resource gate $g did not answer within ${OSRC_FACTORY_GATE_TIMEOUT:-30}s (OSRC_FACTORY_GATE_TIMEOUT); holding this pass"; return 1 ;;
         *) _OSRC_FP_GATE_REASON="resource gate $g failed (rc=$rc); holding this pass until it answers 0 or 1: $(printf '%s' "$out" | head -1 | cut -c1-160)"; return 1 ;;
       esac
-    elif [ "$_OSRC_FP_GATE_WARNED" != "$g" ]; then
-      _OSRC_FP_GATE_WARNED="$g"
-      printf 'outsourcerer: resource gate %s is not a file (name one script, no arguments); ignoring it\n' "$g" >&2
+    else
+      _OSRC_FP_GATE_REASON="resource gate $g is not a file (name one script, no arguments, in OSRC_FACTORY_GATE or the repo profile's gate); holding launches until it is there"; return 1
     fi
   fi
   # Disk: ask the launch path's own gate (lib/cleanup.sh) in probe mode, so a cleanup ack counts here
@@ -184,6 +188,24 @@ _osrc_fp_gate_can_run() {
     _OSRC_FP_GATE_REASON="swap is ${s}% used, over ${OSRC_FACTORY_SWAP_MAX_PCT:-0}% (OSRC_FACTORY_SWAP_MAX_PCT; 0 turns it off)"; return 1
   fi
   return 0
+}
+
+# _osrc_fp_profile_pin <plan> -> rc0 when the repo profile and the gate script it names are the ones this
+# plan first ran with (their checksum, recorded then in <plan>/profile.pin). Both run on this machine,
+# outside any worker sandbox, and a worker's landed change can rewrite them: a change holds launches
+# with _OSRC_FP_GATE_REASON until the captain reads it and removes the pin.
+_osrc_fp_profile_pin() {
+  local pf file root g cur old=""
+  pf="$(_plan_dir "$1" 2>/dev/null)/profile.pin"
+  root="$(_osrc_fp_root "${OSRC_FACTORY_ROOT:-.}")" || root=""
+  file="${OSRC_FACTORY_PROFILE:-}"; [ -n "$file" ] || [ -z "$root" ] || file="$root/.outsourcerer.toml"
+  g="$(_osrc_fp_get factory gate)"; case "$g" in ''|/*) ;; *) [ -z "$root" ] || g="$root/$g" ;; esac
+  cur="$( { cat "$file" 2>/dev/null; printf '\n-- gate --\n'; [ -z "$g" ] || cat "$g" 2>/dev/null; } | cksum)"
+  [ -f "$pf" ] || { printf '%s\n' "$cur" > "$pf" 2>/dev/null; return 0; }
+  IFS= read -r old 2>/dev/null < "$pf"
+  [ "$old" = "$cur" ] && return 0
+  _OSRC_FP_GATE_REASON="the repo profile ${file:-.outsourcerer.toml} or the gate script it names changed since this plan started; they run on this machine, so launches wait for you. Read them, then accept with: rm $pf"
+  return 1
 }
 
 # _osrc_fp_max_parallel [explicit] -> the launch cap (see header). rc1 with a message on a bad value.
@@ -303,7 +325,7 @@ _ff_dispatch() {   # <plan> <max-parallel>
   tasks="$(_task_list "$plan")" || return 1
   active="$(printf '%s' "$tasks" | _ff_jq '[.[] | select(.state == "running" or .state == "verifying")] | length')"
   local gate_ok=1
-  _osrc_fp_gate_can_run || gate_ok=0
+  _osrc_fp_gate_can_run "$plan" || gate_ok=0
   [ "$gate_ok" = 1 ] && _OSRC_FP_PAUSE_SAID=""
   for tid in $ready; do
     _ff_out_of_time && return 0

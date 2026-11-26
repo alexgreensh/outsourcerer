@@ -444,10 +444,10 @@ a.pill svg { width: 13px; height: 13px; }
       return r.json();
     }, (e) => { const x = new Error(ac.signal.aborted ? 'Not sent, try again' : ((e && e.message) || 'unreachable')); x.timeout = ac.signal.aborted; throw x; }).finally(() => clearTimeout(t));
   }
-  // A poll that brings the same data re-renders nothing (exported_at changes on every export, so it is ignored).
+  // A poll that brings the same data re-renders nothing (exported_at is ignored), but the band tracker still sees the new export.
   const sig = (snap) => JSON.stringify(snap.docs.map((d) => [d.id, d.data()]), (k, v) => (k === 'exported_at' || k === 'summaryAt' ? undefined : v));
   function applyProjects(snap) {
-    const s = sig(snap); if (s === sigP && !firstPull && !pullErr) return; sigP = s;
+    const s = sig(snap); if (s === sigP && !firstPull && !pullErr) { const ex = {}; snap.docs.forEach((d) => { ex[d.id] = d.data().exported_at; }); projects.forEach((p) => { if (ex[p.id] !== undefined) p.exported_at = ex[p.id]; }); if (A && A.refresh(projects).moved) pollRender(); return; } sigP = s;
     pullErr = '';
     projects = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).map((p) => (window.OSRC_HUB_CLEAN ? OSRC_HUB_CLEAN.project(p) : p)).filter((p) => p.status !== 'archived').sort((a, b) => (a.order || 99) - (b.order || 99));
     if (firstPull) { current = pickStart(); firstPull = false; } else if (current && !projects.some((p) => p.id === current)) current = null;

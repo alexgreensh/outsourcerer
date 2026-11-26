@@ -57,6 +57,7 @@ ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}--[A-Za-z0-9][A-Za-z0-9._-]
 # Project slugs, same rule as hub.sh _osrc_hub_slug_ok: no leading dot, <=128.
 # Always fullmatch: re.match with "$" also accepts a trailing newline.
 SLUG_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$")
+HELLO_RE = re.compile(r"[0-9a-f]{32}")   # /hello nonce: 16 random bytes, hex
 STATUS_PATH_RE = re.compile(r"^/api/projects/([^/]+)/status$")
 
 
@@ -91,6 +92,7 @@ class Hub:
         self.plans_finished = 0.0
         self.cache_ts = 0.0
         self.export_error = ""
+        self.export_error_at = 0   # when exports started failing (the page says "export failing since")
         self.lock = threading.Lock()
         self.export_lock = threading.Lock()
         self.last_poll = time.time()
@@ -116,7 +118,9 @@ class Hub:
     # Keys this OSRC_HOME's hubs have served, as salted SHA-256 (never the key itself), in
     # hub/keys.json (0600): [{salt, hash, current, retired_at}]. A key stops being current when a hub
     # starts with a different one; it is accepted by /reopen for KEY_TTL after that, newest KEY_KEEP only.
-    KEY_TTL = 7 * 86400
+    # Hours, not days: a restart with a new key must soon revoke old URLs left in scrollback, shell
+    # history or a shared screenshot. A tab older than this reopens with `outsourcerer mc`.
+    KEY_TTL = 12 * 3600
     KEY_KEEP = 5
 
     @staticmethod
@@ -321,6 +325,8 @@ class Hub:
         if not isinstance(doc, dict) or not isinstance(doc.get("projects"), list):
             raise RuntimeError("export output is not a SCHEMA document")
         pj = doc["projects"][0] if doc["projects"] else None
+        if isinstance(pj, dict):   # only this project is new; the doc keeps the age of the rest
+            pj = dict(pj, generated_at=int(time.time()))
         with self.lock:
             data = dict(self.cache)
             projects = [pj if isinstance(pj, dict) and p.get("id") == slug else p
@@ -328,7 +334,6 @@ class Hub:
             if pj is None:
                 projects = [p for p in data.get("projects", []) if p.get("id") != slug]
             data["projects"] = projects
-            data["generated_at"] = int(time.time())
         data["exported_at"] = int(time.time())
         data = self._with_status(data)
         self._safe_write("", "export.json", data)
@@ -336,6 +341,7 @@ class Hub:
             self.cache = data
             self.cache_ts = time.time()
             self.export_error = ""
+            self.export_error_at = 0
         self.last_state_mtime = self.state_mtime()
         self._prev_scan = self._scan
         return data
@@ -391,6 +397,7 @@ class Hub:
             self.cache = data
             self.cache_ts = time.time()
             self.export_error = ""
+            self.export_error_at = 0
         self.last_state_mtime = self.state_mtime()
         self._prev_scan = self._scan
         return data
@@ -402,9 +409,13 @@ class Hub:
                         and (self.state_mtime() != self.last_state_mtime or time.time() - self.cache_ts > REFRESH_SECS + 10):
                     self.run_export()
             except Exception as e:  # keep serving last good cache; surface the error
-                with self.lock:
-                    self.export_error = str(e)[:300]
+                self.note_error(e)
             time.sleep(REFRESH_SECS)
+
+    def note_error(self, e):
+        with self.lock:
+            self.export_error = str(e)[:300]
+            self.export_error_at = self.export_error_at or int(time.time())
 
     def load_saved(self):
         """Warm start: serve the last export.json this hub wrote while the first export runs, so a
@@ -468,6 +479,7 @@ class Hub:
                         return self._merge_project_export(slug, timeout=SNAP_EXPORT_SECS), ""
                     return self.run_export(timeout=SNAP_EXPORT_SECS), ""
                 except Exception as e:
+                    self.note_error(e)
                     with self.lock:
                         if self.cache is not None:
                             return self.cache, str(e)[:300]
@@ -476,6 +488,7 @@ class Hub:
         try:
             return self.run_export(), ""
         except Exception as e:
+            self.note_error(e)
             with self.lock:
                 if self.cache is not None:
                     return self.cache, str(e)[:300]
@@ -734,7 +747,8 @@ def make_handler(hub):
 
         def _reopen(self):
             # POST /reopen with X-Hub-Old-Token: a tab holding a key an earlier hub here served (and
-            # retired within 7 days) gets the current page URL. Same-origin POST only, loopback Host
+            # retired within KEY_TTL, 12 h) gets the current page URL. A browser POST from this server's own
+            # page only (Origin or Sec-Fetch-Site must say so: curl and scripts send neither), loopback Host
             # (do_POST). A script with no old key, or an unknown one, gets 403 and nothing else.
             if not hub.retired_key_ok((self.headers.get("X-Hub-Old-Token") or "").strip()):
                 return self._send_json(self.REOPEN_DENIED, 403)
@@ -747,6 +761,14 @@ def make_handler(hub):
             path = u.path
             if path == "/reopen":
                 return self._send_json(self.REOPEN_DENIED, 403)   # POST with the old key only
+            if path == "/hello":
+                # Identity without the token: HMAC(token, "osrc-hub-hello:" + nonce). `mc` checks it before
+                # it reuses a hub, so a process that took a probed port never receives the token.
+                n = urllib.parse.parse_qs(u.query).get("n", [""])[0]
+                if not HELLO_RE.fullmatch(n):
+                    return self._send_json({"error": "bad nonce"}, 400)
+                return self._send_json({"proof": hmac.new(hub.token.encode("utf-8"), ("osrc-hub-hello:" + n).encode(),
+                                                          hashlib.sha256).hexdigest()})
             if path.startswith("/assets/"):
                 # A font fetch means a page is open — count it as a poll so the
                 # idle timer reflects real use.
@@ -782,8 +804,10 @@ def make_handler(hub):
                 if not hub.first_export.wait(timeout=STARTING_WAIT):
                     return self._send_json({"generated_at": int(time.time()), "projects": [], "starting": True})
                 payload, err = hub.projects_payload()
-                if err:
-                    payload["export_error"] = err
+                if err:   # the page reads both: "Not live: export failing since HH:MM"
+                    payload = dict(payload, export_error=err, export_error_since=hub.export_error_at or int(time.time()))
+                if hub.warming:   # a restart serving the last run's export.json until its first export lands
+                    payload = dict(payload, warming=True)
                 self._send_json(payload)
             elif path == "/api/answers":
                 self._send_json(hub.answers())
@@ -794,6 +818,9 @@ def make_handler(hub):
             if urllib.parse.urlparse(self.path).path == "/reopen":
                 if not self._host_ok() or not self._post_origin_ok():
                     return self._deny()
+                sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                if not (self.headers.get("Origin") or sfs == "same-origin"):
+                    return self._send_json(self.REOPEN_DENIED, 403)
                 return self._reopen()
             if not self._host_ok() or not self._token_ok() or not self._post_origin_ok():
                 return self._deny()
@@ -890,6 +917,7 @@ def main():
         try:
             hub.run_export()
         except Exception as e:
+            hub.note_error(e)
             sys.stderr.write("[hub] initial export failed (will retry): %s\n" % e)
         finally:
             with hub.lock:
