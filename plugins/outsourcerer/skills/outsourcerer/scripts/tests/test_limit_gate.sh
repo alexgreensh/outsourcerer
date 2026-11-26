@@ -876,6 +876,11 @@ out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative 2>&1 </dev/null )"; rc=$?
 [ $rc -ne 0 ] && case "$out" in *"no fresh reading"*) ok "r3.1 cap: unread capped meter refuses an unpinned auto launch (rc=$rc)" ;; *) bad "r3.1 cap: unread unpinned wrong (rc=$rc): $out" ;; esac
 out="$( _fb_user_pinned=0 _osrc_cap_gate cx x cxnative nohop 2>&1 </dev/null )"; rc=$?
 [ $rc -ne 0 ] && [ $rc -ne 10 ] && ok "r3.1 cap: unread cap, no hop possible -> refuses" || bad "r3.1 cap: unread nohop rc=$rc: $out"
+# rv F10: the refusal (new in 0.18.0 for auto launches) names the fix with a runnable NEXT
+grep -q '^NEXT .* lane cap cx --clear$' <<<"$out" && grep -q 'every launch on this lane is refused' <<<"$out" \
+  && ok "rv F10 cap: unread-meter refusal prints NEXT lane cap cx --clear" || bad "rv F10 cap: no NEXT naming the fix: $out"
+out="$( OSRC_FORCE_LANE=1 _fb_user_pinned=0 _osrc_cap_gate cx x cxnative nohop 2>&1 </dev/null )"
+grep -q '^NEXT ' <<<"$out" && bad "rv F10 cap: --force-lane run still printed a refusal NEXT" || ok "rv F10 cap: --force-lane prints no refusal NEXT"
 ( OSRC_FORCE_LANE=1 _fb_user_pinned=0 _osrc_cap_gate cx x cxnative >/dev/null 2>&1 </dev/null ) \
   && ok "r3.1 cap: --force-lane still proceeds past an unread cap" || bad "r3.1 cap: --force-lane blocked by an unread cap"
 # Malformed standing spec (hand edit) with a live reading: never silently skipped.

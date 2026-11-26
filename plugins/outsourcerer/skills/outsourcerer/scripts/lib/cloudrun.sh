@@ -705,7 +705,8 @@ _cloudrun_start() {
     else
       fref="no session link appeared within ${OSRC_CLOUD_LAUNCH_WAIT:-30}s (raise OSRC_CLOUD_LAUNCH_WAIT if the vehicle is slow)"
     fi
-    die "cloud: the $veh session did not start: $fref. A session may still have been created: check the vehicle dashboard. Nothing was registered.
+    _cloudrun_orphan_note "$id" "$veh" "$fref" "$log"
+    die "cloud: the $veh session did not start: $fref. A session may still have been created: check the vehicle dashboard. Nothing was registered; '$0 status' lists this launch until you clear it ($(_cloudrun_cdir)/$id.orphan).
 ${cls#*	}
 its last output:
 $(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
@@ -718,6 +719,24 @@ $(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -5)"
   printf '  quota   : %s\n' "$(_cloudrun_vehicle_quota "$veh")"
   printf '  log     : %s (launcher pid %s)\n' "$log" "$pid"
   printf '  track   : %s lane ls · %s lane events · READY = %s.READY at %s tip\n' "$0" "$0" "$id" "$branch"
+  return 0
+}
+
+# _cloudrun_orphan_note <id> <vehicle> <what> <log> -> a launch that failed AFTER the spend gate and
+# consent may still have created a (metered) hosted session nothing tracks. Leave a note that
+# `status` prints on every run until the user has checked the dashboard and removed it (rv F19).
+_cloudrun_orphan_note() {
+  ( umask 077; printf 'when: %s\nvehicle: %s\nwhat: %s\nlog: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "$3" "$4" \
+      > "$(_cloudrun_cdir)/$1.orphan" ) 2>/dev/null || true
+}
+# _cloudrun_orphans -> one warning per cloud/<id>.orphan (called by a bare `status`).
+_cloudrun_orphans() {
+  local f
+  for f in "$(_cloudrun_cdir)"/*.orphan; do
+    [ -f "$f" ] || continue
+    printf '!! cloud %s: an untracked %s session may exist (launch failed %s: %s). Check the vehicle dashboard and stop it if it runs; then: rm %q\n' \
+      "$(basename "$f" .orphan)" "$(sed -n 's/^vehicle: //p' "$f")" "$(sed -n 's/^when: //p' "$f")" "$(sed -n 's/^what: //p' "$f")" "$f"
+  done
   return 0
 }
 

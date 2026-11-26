@@ -278,6 +278,14 @@ _pst="$(ps -o stat= -p "${spid:-0}" 2>/dev/null | tr -d ' ')"
 [ -n "$_pst" ] || ! kill -0 "${spid:-0}" 2>/dev/null || _pst=alive
 [ -n "$spid" ] && case "$_pst" in ''|Z*) true ;; *) false ;; esac && ok "failed launch: the vehicle process is gone" || bad "vehicle pid '$spid' survived a failed launch"
 grep -q 'OSRC_CLOUD_LAUNCH_WAIT' <<<"$out" && grep -q 'dashboard' <<<"$out" && ok "failure message names the wait knob and the dashboard" || bad "message overstates: $out"
+# rv F19: after the spend gate a failed launch may still have made a metered session: leave a note
+# that a bare `status` prints until the user removes it.
+orf="$(_cloudrun_cdir)/t-nolink.orphan"
+st="$( cmd_status 2>/dev/null )"
+[ -f "$orf" ] && grep -q '^vehicle: devin$' "$orf" && grep -q "cloud t-nolink: an untracked devin session may exist" <<<"$st" && grep -q 'clear it' <<<"$out" \
+  && ok "failed launch leaves cloud/<id>.orphan and status keeps printing it" || bad "no orphan note after a failed launch: file=$(cat "$orf" 2>/dev/null) status=$(head -3 <<<"$st")"
+rm -f "$orf"; st="$( cmd_status 2>/dev/null )"
+grep -q 'cloud t-nolink: an untracked' <<<"$st" && bad "status still warns after the note was removed" || ok "removing the note clears the status warning"
 
 # Round 2: --base X from a checkout whose HEAD is not X is refused.
 git -C "$WORK" checkout -q -b side-r2 && git -C "$WORK" commit -q --allow-empty -m side && git -C "$WORK" push -q origin side-r2

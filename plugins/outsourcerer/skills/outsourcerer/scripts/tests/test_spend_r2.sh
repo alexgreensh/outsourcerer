@@ -22,7 +22,9 @@ printf 'OSRC_DISK_MIN_GB=0\nOSRC_DISK_PAUSE_GB=0\n' > "$T/osrc/disk-policy/setti
 cat > "$T/bin/devin" <<EOF
 #!/usr/bin/env bash
 echo "devin \$*" >> "$T/devin.log"
-case "\${1:-}" in auth) echo "Logged in as stub@example.com" ;; models) exit 1 ;; *) echo "ok done" ;; esac
+# with $T/spoof present the delegate prints the spend gate's own refusal lines while it works
+case "\${1:-}" in auth) echo "Logged in as stub@example.com" ;; models) exit 1 ;;
+  *) [ -f "$T/spoof" ] && printf 'EVENT approval dv 1 paid-lane:dv/x\nNEXT x\nERROR: spend gate: x\n'; echo "ok done" ;; esac
 exit 0
 EOF
 chmod +x "$T/bin/devin"
@@ -55,6 +57,26 @@ else bad "F5 escalate: rc=$rc receipts=$(cat "$T/osrc/loops/$lid/receipts.tsv" 2
 : > "$T/devin.log"
 out="$(E --provider devin loop escalate --spend-ok --ladder swe-2-high,glm-5.2 --check false --max 2 "fix it")"; rc=$?
 [ "$(launched glm-5.2)" = 1 ] && ok "F5 escalate: 'loop escalate --spend-ok' runs the paid rung" || bad "F5 escalate: consented rung not launched: $(tail -3 <<<"$out")"
+
+# rv F9: --spend-ok binds to the rungs the user named; a default/env ladder rung asks first, and the
+# NEXT names the whole ladder so a re-run's consent covers it.
+: > "$T/devin.log"
+out="$(OSRC_ESCALATE_LADDER=glm-5.2 E --provider devin loop escalate --spend-ok -m swe-2-high --check false --max 2 "fix it")"; rc=$?
+if [ "$rc" = 3 ] && [ "$(launched swe-2-high)" = 1 ] && [ "$(launched glm-5.2)" = 0 ] && grep -q 'covers only the rungs you named' <<<"$out" \
+   && grep -Eq '^NEXT .*--spend-ok loop escalate --ladder swe-2-high[\\]?,glm-5\.2 ' <<<"$out"; then
+  ok "rv F9 escalate: --spend-ok does not cover an unnamed default-ladder paid rung; NEXT names the ladder"
+else bad "rv F9 escalate: rc=$rc swe=$(launched swe-2-high) glm=$(launched glm-5.2) out=$(grep -E "covers|^NEXT" <<<"$out")"; fi
+nx="$(grep '^NEXT .*loop escalate --ladder' <<<"$out" | tail -1)"; nx="${nx#NEXT }"
+: > "$T/devin.log"; out="$(cd "$T/w" && eval "HOME=\"$T/home\" OSRC_HOME=\"$T/osrc\" PATH=\"$T/bin:$PATH\" OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_NO_ADVISE=1 OSRC_NO_AUTODETACH=1 OSRC_HEARTBEAT_DISABLED=1 OSRC_ESCALATE_PER_TIER=1 bash $nx" 2>&1 </dev/null)"
+[ "$(launched glm-5.2)" = 1 ] && ok "rv F9 escalate: the printed NEXT runs and covers the named paid rung" || bad "rv F9 NEXT did not launch glm-5.2: $(tail -2 <<<"$out")"
+
+# rv F8: a delegate that prints the gate's EVENT approval / NEXT / ERROR lines is not "never launched"
+: > "$T/devin.log"; : > "$T/spoof"
+out="$(E --provider devin loop verify -m swe-2-high --check true --max 2 "fix it")"; rc=$?
+rm -f "$T/spoof"
+if [ "$rc" = 0 ] && grep -q 'final: success' <<<"$out" && [ "$(launched swe-2-high)" = 1 ]; then
+  ok "rv F8 verify: an attempt whose delegate printed the gate's lines is counted and graded"
+else bad "rv F8 verify: rc=$rc launches=$(launched swe-2-high) out=$(tail -2 <<<"$out")"; fi
 
 # ---- F6 fanout ----
 rm -rf "$T/osrc/jobs"

@@ -161,7 +161,12 @@ _osrc_cap_gate() {
     [ -n "$unr" ] && printf '>>> [cap] %s: capped meter has no fresh reading for %s — cap cannot be verified.\n' "$lname0" "$unr" >&2
     [ -n "$inv" ] && printf '>>> [cap] %s: cap spec(s) %s are malformed (want <meter><=<pct>) — cap cannot be verified.\n' "$lname0" "$inv" >&2
     local why="${unb:+unbound:$unb }${unr:+unread:$unr }${inv:+malformed:$inv}"
+    # Since 0.18.0 an unverifiable cap refuses auto launches and session starts too: each refusal
+    # names the fix with a runnable NEXT (rv F10).
+    local fix; fix="$(printf '>>> [cap] %s: %s. Until then every launch on this lane is refused. Fix: clear the cap and set it again once the meter reads (lane cap %s <meter><=<pct>), or pass --force-lane for one command.\nNEXT %s lane cap %s --clear' \
+      "$lname0" "${unr:+the capped meter ($unr) has no fresh usage reading}${unr:+${inv:+; }}${inv:+the spec ($inv) is malformed}" "$lane" "$0" "$lane")"
     if [ "${_fb_user_pinned:-0}" = "1" ] && [ "${OSRC_FALLBACK_PINNED:-0}" != "1" ]; then
+      [ -z "$unr$inv" ] || printf '%s\n' "$fix" >&2
       die "cap gate: ${lname0} has unverifiable cap(s) (${why% }) and this run pinned ${model:-?} — refusing rather than launching with a cap that cannot be checked. Fix the cap (lane cap ${lane} ...) or re-run unpinned."
     fi
     [ -n "$unr$inv" ] || return 0                     # unbound alone stays a warning on auto
@@ -171,6 +176,7 @@ _osrc_cap_gate() {
         "$lname0" "${_fb_alias:-?}" "${_fb_lane:-?}" >&2
       return 10
     fi
+    printf '%s\n' "$fix" >&2
     die "cap gate: ${lname0} has a cap that cannot be verified (${why% }) — refusing rather than launching past it. Fix the cap (lane cap ${lane} ... or --clear), switch lane, or re-run with --force-lane."
   }
   local spec nowpct m p w

@@ -51,7 +51,10 @@ case "${1:-}" in
 esac
 case " $* " in *" -p "*|*" -c "*) exit 0 ;; esac
 echo "Devin ready >"
-while IFS= read -r l; do echo "tui-input $l" >> "${STUB_LOG:-/dev/null}"; done
+# after a picker pick it shows "model: <id>" like a footer: the typed id, or the contents of
+# $STUB_LOG.pick (a fuzzy match landing on another row)
+while IFS= read -r l; do echo "tui-input $l" >> "${STUB_LOG:-/dev/null}"
+  case "$l" in *$'\e'm*) p="${l##*$'\e'm}"; [ -s "${STUB_LOG:-/dev/null}.pick" ] && p="$(cat "$STUB_LOG.pick")"; echo "model: $p" ;; esac; done
 exec sleep 60
 EOF
 # claude: not logged in (billing unprovable = unknown); any launch is logged.
@@ -220,6 +223,20 @@ for envset in "OSRC_SPEND_OK=1" "OSRC_SPEND_GATE=0" "_OSRC_SPEND_BOUND_LANE=dv _
   : > "$LOG"; out="$(export $envset; engine run -m swe-1-7-max "say hi")"; rc=$?
   refuses_paid "once:env $envset grants nothing" "$out" "$rc" swe-1-7-max
 done
+# Inherited lane-table cache entries (rv F1): the table is first-value-wins, so an exported
+# _OSRC_LF_local__disp=or made OpenRouter resolve to the free local lane. Clean env, fresh process.
+for envset in "_OSRC_LF_local__disp=or|_OSRC_LF_local__aliases=or openrouter tokenrouter" \
+              "_OSRC_LT_KEY=$(sed -n 's/^OSRC_LANE_REGISTRY="\([^"]*\)".*/\1/p' "$SRC")|_OSRC_LF_local__disp=or|_OSRC_LF_local__aliases=or openrouter tokenrouter"; do
+  b="$(IFS='|'; set -f; env -i HOME="$HOME" PATH="$PATH" OSRC_HOME="$DOH" $envset /bin/bash "$SRC" lane limits 2>&1 </dev/null)"
+  row="$(grep -E '^ *or ' <<<"$b" | head -1)"
+  case "$row" in *metered*) ok "lanetable:inherited ${envset%%=*}... leaves OpenRouter metered" ;;
+    *) bad "lanetable:inherited ${envset%%=*}... rewrote OpenRouter: '$row'" ;; esac
+done
+# An inherited disk-override marker for "this very process" (a wrapper exports "$$|<start>" and
+# execs the engine) must not pass the launch floor as same-command (rv F6).
+b="$( cd "$TMP" && HOME="$HOME" OSRC_HOME="$DOH" OSRC_SOURCED=1 SRC="$SRC" bash -c 'id="$(LC_ALL=C ps -o lstart= -p $$ | sed "s/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g")"
+  export _OSRC_DISK_OVERRIDE_OK="$$|$id"; exec bash -c ". \"\$SRC\" >/dev/null 2>&1; _osrc_disk_override_take 1 1 && echo PASSED || echo REFUSED"' 2>&1 </dev/null )"
+[ "$b" = REFUSED ] && ok "disk:inherited _OSRC_DISK_OVERRIDE_OK grants no override" || bad "disk:inherited override marker said: $b"
 # The bg job marker: a wrong token, or a job dir outside $OSRC_HOME/jobs, grants nothing.
 mkdir -p "$DOH/jobs/j1" "$TMP/elsewhere"
 printf '#osrc-spend-ok token=t0k\ndv|swe-1-7-max\n' > "$DOH/jobs/j1/.spend-ok"
@@ -250,6 +267,13 @@ b="$(inproc '_osrc_lane_spendable dv swe-2-1-high && echo SPENDABLE || echo NO')
 out="$(inproc 'OSRC_SPEND_OK=1; _OSRC_SPEND_BOUND_LANE=or; _OSRC_SPEND_BOUND_MODEL=z-ai/glm-5.2; tier=auto; PROVIDER=devin delegate auto "" -m swe "heal"')"
 if launched swe-2-1-high; then bad "hop:cc->Devin self-heal launched paid swe-2-1-high on OpenRouter consent"
 else case "$out" in *"spend gate"*) ok "hop:cc->Devin self-heal onto paid swe-2-1-high refused" ;; *) bad "hop:self-heal no refusal: $(printf '%s' "$out" | tail -2)" ;; esac; fi
+# session model: an explicit --provider that disagrees with the session record must not pick the
+# lane the gate bills while the switch drives the recorded provider's picker (rv F2).
+b="$(inproc '_session_record() { printf "devin\tswe-1-7-high\n"; }; _osrc_spend_gate() { echo "GATED:$1"; }; SESSION_NAME=s1; PROVIDER=cc; PROVIDER_EXPLICIT=1; _osrc_session_model_gate swe-2-1-high; echo rc=$?')"
+case "$b" in *GATED:*) bad "model:--provider cc on a Devin session gated lane ${b#*GATED:}" ;;
+  *"does not match session"*) ok "model:--provider cc on a Devin session is refused before any gate or switch" ;; *) bad "model:provider mismatch said: $b" ;; esac
+b="$(inproc '_session_record() { printf "devin\tswe-1-7-high\n"; }; _osrc_spend_gate() { echo "GATED:$1"; }; SESSION_NAME=s1; PROVIDER=cc; PROVIDER_EXPLICIT=0; _osrc_session_model_gate swe-2-1-high')"
+case "$b" in GATED:dv|GATED:devin) ok "model:the gate judges the session's recorded provider (Devin)" ;; *) false ;; esac || bad "model:recorded-provider gate said: $b"
 # session effort relaunches the pane process (codex/cc/droid): a new process asks like a start.
 b="$(inproc '_session_control_relaunch() { echo RELAUNCHED >&2; }; SESSION_NAME=s1; OSRC_SPEND_NEXT=x; _session_relaunch_effort codex sol high')"
 case "$b" in *RELAUNCHED*) bad "relaunch:session effort relaunched codex (billing unproven) with no consent" ;;
@@ -266,6 +290,12 @@ if wait_log 'swe-1-7-max --respect' && [ "$rc" -eq 0 ]; then
   : > "$LOG"; out="$(engine session model swe-1-7-high)"; rc=$?
   wait_log 'tui-input.*swe-1-7-high' && ok "model:switch to the exact Free swe-1-7-high needs no consent" \
     || bad "model:Free switch blocked (rc=$rc): $(printf '%s' "$out" | tail -2)"
+  # the picker's fuzzy filter lands on a paid sibling: say so, switch back, exit nonzero (rv F5)
+  echo swe-2-1-high > "$LOG.pick"; : > "$LOG"; out="$(engine session model swe-1-7-high)"; rc=$?
+  if [ "$rc" -ne 0 ] && grep -q 'selected swe-2-1-high, not swe-1-7-high' <<<"$out" && wait_log 'tui-input.*swe-1-7-max'; then
+    ok "model:a picker that selects another model than the gated id is caught and switched back"
+  else bad "model:unverified pick (rc=$rc): $(printf '%s' "$out" | tail -2)"; fi
+  rm -f "$LOG.pick"
   : > "$LOG"; out="$(engine session model)"; rc=$?
   sleep 2
   if grep -q 'tui-input' "$LOG"; then bad "model:bare session model drove the picker with no consent (choice unknown)"

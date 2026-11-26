@@ -47,12 +47,19 @@ _session_relaunch_effort() {
 
 # _osrc_session_model_gate [NAME] -> `session model` refuses an excluded NAME, then
 # spend-gates the switch. Devin's picker selects by search text, so the gate judges the
-# exact NAME; with no NAME the picker's choice is unknown and the gate asks.
+# exact NAME; with no NAME the picker's choice is unknown and the gate asks. The lane judged is the
+# session's RECORDED provider (the TUI _managed_session_model drives); an explicit --provider that
+# names another lane is refused, or it would bill-check one lane and switch another (rv F2).
 _osrc_session_model_gate() {
-  local name="${1:-}"
+  local name="${1:-}" prov
   [ -n "$name" ] && _exclude_refuse "$name" "session model"
+  prov="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f1)"
+  if [ -n "$prov" ] && [ "${PROVIDER_EXPLICIT:-0}" = 1 ] && [ "$(_osrc_session_lane "${PROVIDER:-}")" != "$(_osrc_session_lane "$prov")" ]; then
+    die "session model refused: --provider ${PROVIDER:-} does not match session '${SESSION_NAME:-}', which runs $prov. Nothing was switched. Drop --provider:  $0 session model${name:+ $(printf '%q' "$name")}"
+  fi
+  prov="${prov:-${PROVIDER:-}}"
   [ -n "${OSRC_SPEND_NEXT:-}" ] || OSRC_SPEND_NEXT="$0 --spend-ok session model${name:+ $(printf '%q' "$name")}"
-  _osrc_spend_gate "$(_osrc_session_lane "${PROVIDER:-}")" "$name" "${PROVIDER:-}" "session model switch"
+  _osrc_spend_gate "$(_osrc_session_lane "$prov")" "$name" "$prov" "session model switch"
 }
 # _osrc_or_member_gate <model> -> delegate_cc / delegate_codex judge EVERY OpenRouter chain member
 # before launching it. route_delegate showed (and the user consented to) one model; on a transport
@@ -68,14 +75,13 @@ _osrc_or_member_gate() {
 # case after leading blanks. One plain id after it is gated as `session model <id>` on the session's
 # recorded provider; no id or anything else after /model is refused (the pick would be unknown).
 _osrc_session_send_model_gate() {
-  local t="${1:-}" arg rest prov
+  local t="${1:-}" arg rest
   t="${t#"${t%%[![:space:]]*}"}"
   case "$t" in /[Mm][Oo][Dd][Ee][Ll]|/[Mm][Oo][Dd][Ee][Ll][[:space:]]*) ;; *) return 0 ;; esac
   read -r _ arg rest <<<"$t"
   case "$arg" in ''|*[!A-Za-z0-9._:/@-]*) arg="" ;; esac
   [ -n "$arg" ] && [ -z "$rest" ] || die "session send refused: text starting with /model switches the model with no spend check. Nothing was typed. Use:  $0 session model <name>"
-  prov="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f1)"
-  PROVIDER="${prov:-${PROVIDER:-}}" _osrc_session_model_gate "$arg"
+  _osrc_session_model_gate "$arg"
 }
 
 # _osrc_take_spend_ok <args...> -> _OSRC_ARGS = args without any --spend-ok before `--` (each one
@@ -89,15 +95,24 @@ _osrc_take_spend_ok() {
   return 0
 }
 # _osrc_loop_needs_approval <shape> <lid> <ldir> <attempt> <next> -> rc0 when the attempt never ran
-# because a spend/cap gate refused it (its EVENT approval line, or the fail-closed lib refusal).
+# because a spend/cap gate refused it: the attempt exited nonzero (attempt-N.rc) AND its output ENDS
+# with the gate's own EVENT approval / NEXT / "ERROR: spend gate" lines, or the fail-closed lib
+# refusal. A delegate that prints such lines while it works is followed by the run's own output or
+# exits 0, so a completed attempt is never read as unlaunched and re-run (rv F8).
 # The loop then stops as needs-approval with one EVENT + NEXT: no check graded, no attempt counted
 # (resume re-runs it), no escalation, no receipt for a run that did not launch (live-test F5).
 _osrc_loop_needs_approval() {
-  local out="$3/attempt-$4.out" ev
-  ev="$(grep -a '^EVENT approval ' "$out" 2>/dev/null | tail -1)"
-  [ -n "$ev" ] || grep -aq 'spend/cap gate library .* missing or damaged' "$out" 2>/dev/null || return 1
-  [ -n "$ev" ] || ev="EVENT approval loop 0 spend gate library damaged"
+  local out="$3/attempt-$4.out" ev t
+  [ -s "$3/attempt-$4.rc" ] || return 1
+  t="$(grep -av '^[[:space:]]*$' "$out" 2>/dev/null | tail -3)"
+  case "$t" in
+    *"spend/cap gate library "*" missing or damaged"*) case "$(tail -1 <<<"$t")" in *"missing or damaged"*) ;; *) return 1 ;; esac
+      ev="EVENT approval loop 0 spend gate library damaged" ;;
+    "EVENT approval "*$'\n'"NEXT "*$'\n'"ERROR: spend gate"*) ev="$(head -1 <<<"$t")" ;;
+    *) return 1 ;;
+  esac
   echo "[loop $1] $2: attempt $4 was not launched: a spend/cap gate needs your approval (nothing spent, no attempt counted). Approve with --spend-ok on the loop; each attempt's consent binds to that attempt's own lane/model." >&2
+  [ "$1" = escalate ] && [ "${OSRC_SPEND_OK:-0}" = 1 ] && echo "[loop escalate] --spend-ok covers only the rungs you named on the command line (-m / --ladder); a default-ladder rung asks first. The NEXT below names the ladder." >&2
   printf 'needs approval: %s\n' "${ev#EVENT approval * * }" > "$3/last_fail" 2>/dev/null || true
   printf '%s\n' "$(( $4 - 1 ))" > "$3/attempt" 2>/dev/null || true
   _osrc_event approval "loop:$2" "${ev#EVENT approval * * }" "$5" spend
@@ -149,3 +164,52 @@ _osrc_task_spend_own() {  # <task-json> <dispatch-model> -> rc0 when the task's 
 }
 
 _OSRC_LIBEND_SPENDPATHS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)
+
+# _osrc_dv_model_verify <pane> <gated-id> -> Devin's picker selects by fuzzy search text, so after
+# the switch read which model the session now shows (the observer adapter, else the last catalog id
+# on the pane's bottom lines) and compare it with the id the gate judged (rv F5). On a mismatch it
+# switches back to the recorded model; rc0 only when the gated id is confirmed.
+_osrc_dv_model_verify() {
+  local pane="$1" want seen="" ids t i prev
+  want="$(printf '%s' "${2:-}" | tr '[:upper:]' '[:lower:]')"
+  ids="$(_catalog_load dv 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  for i in 1 2 3; do
+    sleep 1
+    seen="$(_session_model_observe dv "tmux:$pane" "${SESSION_NAME:-}" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    [ "$seen" = unknown ] && seen=""
+    if [ -z "$seen" ]; then
+      for t in $(tmux capture-pane -p -t "$pane" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -3 | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9._:/\n-' ' '); do
+        grep -qxF -- "$t" <<<"$ids" && seen="$t"
+      done
+    fi
+    [ "$seen" = "$want" ] && return 0
+  done
+  if [ -z "$seen" ]; then
+    echo "ERROR: session model: could not read which model the Devin picker selected, so the switch to $2 is UNVERIFIED (a fuzzy match can land on a paid sibling). Check now:  $0 session read   and stop the session if it shows another model." >&2
+    return 1
+  fi
+  prev="$(_session_record "${SESSION_NAME:-}" 2>/dev/null | cut -f2)"
+  echo "ERROR: session model: the Devin picker selected $seen, not $2 (the model the spend gate judged).${prev:+ Switching back to $prev.} Re-run with the exact id:  $0 session model <id>" >&2
+  [ -n "$prev" ] && _session_model_restore_devin "$pane" "$prev" >/dev/null 2>&1
+  return 1
+}
+
+# _osrc_escalate_spend_ok <rung> -> "--spend-ok" for an escalate rung the user NAMED on the command
+# line (every --ladder rung, or the -m first rung), else nothing. Consent given with --spend-ok binds
+# to the models the user listed; a default/env ladder rung they never named asks its own gate (rv F9).
+# Reads cmd_loop_escalate's ladder_arg / model (dynamic scope).
+_osrc_escalate_spend_ok() {
+  [ "${OSRC_SPEND_OK:-0}" = 1 ] || return 0
+  if [ -n "${ladder_arg:-}" ] || { [ -n "${model:-}" ] && [ "${1:-}" = 0 ]; }; then printf '%s' --spend-ok; fi
+}
+
+# _osrc_escalate_next <rung> -> the NEXT for an escalate rung the gate refused. An unnamed rung
+# refused under --spend-ok gets a NEXT that names the whole ladder, so the consent then covers it.
+# No output but the NEXT: the caller evaluates it for every attempt.
+_osrc_escalate_next() {
+  if [ "${OSRC_SPEND_OK:-0}" = 1 ] && [ -z "$(_osrc_escalate_spend_ok "${1:-}")" ]; then
+    printf '%q ' "$0" --spend-ok loop escalate --ladder "${_ladcsv:-}" --check "${check:-}" --max "${max:-}" --max-minutes "${maxmin:-0}" --per-tier "${pertier:-}" --verb "${verb:-edit}" -- "${task:-}"
+    return 0
+  fi
+  printf '%s' "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}"
+}

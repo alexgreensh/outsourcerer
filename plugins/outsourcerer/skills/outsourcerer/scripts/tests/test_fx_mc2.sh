@@ -120,9 +120,10 @@ fresh 5b; mkdir -p "$OSRC_HOME/watchsvc/limits"; echo fallback > "$OSRC_HOME/wat
 printf '#!/bin/sh\necho "$OUTSOURCERER_TMUX $*" >> %s/sent5\n' "$TMP" > "$TMP/bin/fake-osrc"; chmod +x "$TMP/bin/fake-osrc"
 S "_sv_state_read K; SVS_LK='limit:1'; _sv_state_write K"; echo $(( $(date +%s) - 5 )) > "$OSRC_HOME/watchsvc/limits/K"
 echo 1 > "$OSRC_HOME/watchsvc/limits/K.sending"   # another loop is sending this continue right now
-S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"
+# (_ws_continue_ok, the billing + screen re-check, is stubbed: this block tests the send claim; rv F18 covers the check)
+S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_continue_ok() { return 0; }; _ws_limits"
 [ ! -s "$TMP/sent5" ] && ok "a continue another loop has claimed is never sent twice" || no "double continue: $(cat "$TMP/sent5")"
-rm -f "$OSRC_HOME/watchsvc/limits/K.sending"; S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"; S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"
+rm -f "$OSRC_HOME/watchsvc/limits/K.sending"; S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_continue_ok() { return 0; }; _ws_limits"; S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_continue_ok() { return 0; }; _ws_limits"
 [ "$(grep -c . "$TMP/sent5" 2>/dev/null)" = 1 ] && [ ! -e "$OSRC_HOME/watchsvc/limits/K.sending" ] && ok "unclaimed: exactly one continue, and the claim is released" || no "sends: $(cat "$TMP/sent5" 2>/dev/null)"
 
 echo "=== pattern F4 / architecture F7 / live F14: one hub-liveness rule ==="

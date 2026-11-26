@@ -1,0 +1,74 @@
+# osrc-fx-rv-spend: release-review fixes, spend and consent
+
+Base `cloud/osrc-int` @ 80575c4. Work in progress; sections are filled per finding.
+
+## F1. Inherited `_OSRC_LF_*` / `_OSRC_LT_KEY` rewrote the lane table
+- Mechanism: `_lane_table` is first-value-wins and only cleared old `_OSRC_LF_*` names when `_OSRC_LT_KEY` was non-empty, which it never is in a fresh process, so exported entries beat the descriptors. An inherited `_OSRC_LT_KEY` equal to the registry skipped the rebuild entirely.
+- Fix: `unset _OSRC_LT_KEY` on the registry line (engine start, before the first `_lane_table`), and `_lane_table` unsets every `_OSRC_LF_*` unconditionally before the descriptor pass.
+- Test: `tests/test_spend_attack.sh` "lanetable:" cases (both the `_OSRC_LF_` and the `_OSRC_LT_KEY` variants) under `env -i`. Base: `or  free` (both). After: `or  metered`; suite 64 passed, 0 failed, rc 0.
+
+## F2. `session model` gated the `--provider` lane, then switched the recorded provider
+- Mechanism: `_osrc_session_model_gate` judged `$PROVIDER`; `_osrc_session_adopt_record` keeps an explicit `--provider`, while `_managed_session_model` drives the TUI of the provider in the session's start record. `--provider cc session model <paid devin id>` billed `cc` and typed the id into Devin.
+- Fix (`lib/spend-paths.sh`): the gate reads the provider from `_session_record "$SESSION_NAME"` and dies (nothing typed) when an explicit `--provider` maps to another lane; with no record it falls back to `$PROVIDER`. `_osrc_session_send_model_gate` now just calls it (its own record lookup was the same code).
+- Test: `test_spend_attack.sh` "model:--provider cc on a Devin session is refused" and "model:the gate judges the session's recorded provider". Base: `GATED:cc` for both (fail). After: refused / `GATED:devin` (pass).
+
+## F5. Devin `session model NAME` did not verify the picker's selection (PLAUSIBLE: confirmed by reading)
+- Confirmed: `_managed_session_model` typed the gated id as a search filter and pressed Enter; nothing read the result, and the caller printed "model switch sent". A fuzzy match on a paid sibling (or no match, highlight on another row) ran a model the gate never judged. Not reproducible against a live Devin picker here; reproduced with a stub TUI that selects another row.
+- Fix: `_osrc_dv_model_verify` (`lib/spend-paths.sh`), called from the Devin branch after Enter when a NAME was given. It polls ~3 s for the model the session shows: the observer adapter (`OSRC_SESSION_MODEL_OBSERVER`) first, else the last Devin catalog id on the pane's bottom three non-blank lines. Exact (case-folded) match with the gated id passes. A different id: says which model was selected instead of which gated one, switches back to the model in the session record, exits nonzero. Nothing readable: says the switch is UNVERIFIED, names `session read`, exits nonzero. A bare `session model` (no NAME) is unchanged, because its gate already asks for consent when the pick is unknown.
+- Test: `test_spend_attack.sh` "model:a picker that selects another model than the gated id is caught and switched back" (the stub Devin prints `model: <id>` like a footer, or the id in `$LOG.pick`). Base: rc 0, no message (fail). After: pass.
+- Unproven: the real Devin footer's wording. If it does not show the model id, every `session model NAME` on Devin now ends in the "UNVERIFIED" message with rc 1, even when the switch was right. That is the fail-safe choice. An `OSRC_SESSION_MODEL_OBSERVER` adapter removes it.
+
+## F6. Inherited `_OSRC_DISK_OVERRIDE_OK` passed the disk launch floor
+- Mechanism: `_osrc_disk_override_take` treats `_OSRC_DISK_OVERRIDE_OK == "$$|<start identity>"` as "this command already took the code". Nothing unset it on entry, and `exec` keeps both the pid and its start time, so a wrapper that exported the value and exec'd the engine got `how=same-command` without the one-use code.
+- Fix: added to the engine-start `unset` with the other spend variables (`outsourcerer.sh` line 280, top level, before any gate; same line, no growth). Subshells of one command still share it, because they never re-run the top level.
+- Test: `test_spend_attack.sh` "disk:inherited _OSRC_DISK_OVERRIDE_OK grants no override" (a bash that exports its own `$$|lstart` and execs a shell that sources the engine). Base: `PASSED` and an `override.log` row `same-command` (fail). After: `REFUSED` (pass).
+- `lib/disk_policy.sh` is untouched.
+
+## F7. Health-probe literals `glm-5-2|swe-1-7` skipped the catalog's verdict
+- Mechanism: `_devin_probe_pick` accepted the two plan literals with no Free proof even when the live catalog answered and did not mark them Free, so after a re-pricing a consent-free probe would bill.
+- Fix (`lib/devin-free.sh`): a literal passes without proof only when `_devin_free_ids_get` fails (catalog offline). When the catalog answers, `_osrc_devin_free_for_spend` decides, as it does for every other id. When nothing is proven, the probe is skipped. Its message (`outsourcerer.sh`, same lines) now says "no Devin probe model is proven free (excluded, or the live catalog does not mark it Free)", not "every model is on your exclude list".
+- Test: `tests/test_devin_probe_strict.sh`. The section 2 assertions that had pinned the bug (a fresh catalog without glm-5-2 Free still probed glm-5-2) now expect nothing probed. New cases: a catalog that marks glm-5-2 Free keeps it; a swe-1-7 that is not Free is skipped; the offline doctor probe still pings glm-5-2. Base: 24 passed, 9 failed. After: 33 passed, 0 failed. `test_devin_free_guard.sh` evals the function alone, so it now also sets the lib's `_OSRC_DV_FREE_IDS_GOT` initializer (set -u); rc 0.
+
+## F8. The loop read any `^EVENT approval ` line in an attempt's output as "never launched"
+- Mechanism: `_osrc_loop_needs_approval` grepped the whole attempt output, so a delegate printing that line (tests, logs, or source text from this repo) left a completed attempt uncounted and stopped as `needs-approval`, and resume ran it again. Reproduced: a stub Devin that printed the lines on a Free `loop verify` → rc 3 `needs-approval` after a real launch.
+- Fix: the loop records the attempt's exit code (`attempt-N.rc`, written only when the command fails and removed before each attempt; same two lines in `outsourcerer.sh`). The function now needs both a nonzero exit and output whose last three non-blank lines are the gate's own `EVENT approval` / `NEXT` / `ERROR: spend gate` lines, as `_osrc_spend_gate` prints right before it `die`s. The fail-closed library refusal must also be the last line. A delegate's lines are followed by the engine's own output (receipt), or the run exits 0.
+- Test: `tests/test_spend_r2.sh` "rv F8 verify". Base: rc=3 `needs-approval` (fail, 19/20). After: success, counted (20/20, rc 0). `test_loop_escalate`, `test_loop_resume` and `test_loops` all rc 0.
+- Residual: a delegate that fails (nonzero) AND ends its output with exactly the gate's three lines still reads as a refusal. The loop then stops as needs-approval, which is safe: nothing is spent and the user is asked.
+
+## F9. `loop escalate --spend-ok` consented every rung, named or not (fixed, not documented away)
+- Mechanism: every rung's attempt got `--spend-ok`, so one flag covered the default/env ladder's paid rungs as well, which the user never named.
+- Fix: `_osrc_escalate_spend_ok <rung>` (`lib/spend-paths.sh`) forwards `--spend-ok` only to rungs named on the command line: every `--ladder` rung, or the `-m` first rung. Rungs from the default ladder or `OSRC_ESCALATE_LADDER` go through their own gate, and a paid one stops the loop as needs-approval. `_osrc_escalate_next` then prints a NEXT that names the whole ladder (`--spend-ok loop escalate --ladder a,b,... --check ... -- task`), so the re-run's consent covers every rung shown. The needs-approval message says why. `outsourcerer.sh` changed only on the same two lines.
+- Test: `tests/test_spend_r2.sh` "rv F9 escalate" (two cases: the unnamed paid rung is refused and NEXT names the ladder; running that NEXT launches it). Base: the unnamed glm-5.2 rung launched (fail). After: 22/22 pass. `test_loop_escalate` and `test_cost_disclosure` rc 0.
+- Proposed release note: "`loop escalate --spend-ok` now consents only the rungs you named with `-m`/`--ladder`; a paid rung from the default ladder stops the loop as needs-approval with a NEXT that names the full ladder."
+
+## F10. An unread or malformed cap refuses auto launches and session starts (intended behaviour change)
+- Mechanism: since 0.18.0 `_osrc_cap_gate` dies when a standing cap's meter has no fresh reading, or its spec is malformed, for auto launches too. Before, only pinned launches died. A stale meter therefore refuses every launch on that lane, and the refusal only named `--force-lane` in passing.
+- Fix (`lib/caps.sh`): each such refusal (pinned and auto; not the hop or `--force-lane` paths) first prints why every launch on this lane is refused and how to fix it, then a runnable `NEXT <engine> lane cap <lane> --clear`. Gate logic unchanged.
+- Test: `tests/test_limit_gate.sh` "rv F10 cap" (two cases: the refusal carries the NEXT; `--force-lane` prints none). Base: 132/133 (the NEXT case fails). After: 133/133, rc 0.
+- Proposed release note: "A lane cap whose meter has no fresh usage reading (or a malformed cap) now refuses auto launches and session starts on that lane, not just pinned ones. The refusal prints `NEXT outsourcerer lane cap <lane> --clear`; `--force-lane` still launches one command."
+
+## F18. The watcher typed `continue` after a limit reset with no billing or screen re-check (PLAUSIBLE: confirmed by reading)
+- Confirmed: `_ws_limits` called `session send "continue"` once the reset passed. The only screen guard on that path, `_managed_composer_state`, reports `empty` for a non-Claude engine whenever it finds no composer and sees no recognized approval/question, so an unrecognized post-limit overage or pay-as-you-go menu got the keystrokes. Nothing checked the lane's billing.
+- Fix (`lib/watchsvc.sh`, `_ws_continue_ok`, run right before the send). Billing comes first: the session's recorded lane must bill `free` or `subscription`. Otherwise (metered or unknown) the reset is marked handled and one `approval` row says "limit reset, not continued automatically: lane X bills Y", with `NEXT … session send continue`. Then the screen, re-read via `lib/screen.sh`: the engine's composer must be found and empty, in state `idle`, `composer` or `limit` (an old banner above an empty, ready composer). Anything else (a menu, a prompt, typed text, an unreadable pane) holds the send and retries with the existing backoff.
+- Test: `tests/test_watchsvc.sh` block "rv F18", 8 cases on real pane fixtures (`cx-idle`, `cx-limit-usage`, `cx-approval`, `cc-composer-typed-unsent`), plus two `_ws_limits` runs (metered: no keys, approval row, `.done`; prompt on screen: no keys, `.try`). Base: fail (no check, keys sent). After: 113 passed, 0 failed, rc 0. The earlier incident-4 cases stub `_ws_continue_ok` to 0, since they test scheduling, not the re-check.
+- Behaviour change, proposed release note: "The standing watcher now continues a limit-parked lane only if that lane bills free/subscription and its screen shows an empty, ready composer; for a metered lane it posts an approval row instead of typing."
+
+## F19. A cloud launch slower than `OSRC_CLOUD_LAUNCH_WAIT` was killed after consent, and nothing tracked a session that may exist
+- Mechanism: after the spend gate and `--spend-ok`, `_cloudrun_launch` gives up when no session link shows within the wait (30 s), kills the launcher, and `_cloudrun_start` dies with "check the vehicle dashboard. Nothing was registered." A metered Devin session created server-side before the kill would bill with no record anywhere.
+- Fix (`lib/cloudrun.sh`): any launch that fails after the gate writes `cloud/<id>.orphan` (time, vehicle, what was seen, launch log). `_cloudrun_orphans` prints one `!! cloud <id>: an untracked <vehicle> session may exist … then: rm <note>` line per note, and a bare `status` calls it on every run (`outsourcerer.sh`, same line as `_mark_watched`). The die message names the note and says `status` lists it until cleared. I chose a note over tailing for a late link: a background registrar would need the whole registration context, and `lane add` would run after the command had already returned failure. Re-launching still requires the user.
+- Test: `tests/test_cloudrun.sh` (2 cases after the no-link launch): the note exists and `status` prints it; removing the note clears the warning. Base: 139/140 (no note). After: 140/140, rc 0.
+- Behaviour change, proposed release note: "A hosted-session launch that fails after you approved it now leaves `cloud/<id>.orphan`; `outsourcerer status` warns about it until you check the vehicle dashboard and remove the note."
+
+## Base verification (earlier work on `cloud/osrc-int`)
+I read `git log ea34fe0..HEAD` (100 commits; the base carries no `reports/*.md`) only as far as these findings touch it: the lane-table cache (`be7587f` and its predecessors), the session-model and send gates, the loop needs-approval path (live-test F5), the Devin probe pick, the cap gate's unread refusal, the watcher's limit continue and the cloud launch wait. Each defect found there is one of the findings above. I found nothing else wrong in those paths. I did not audit the other base commits.
+
+## Open questions (decided by the lane)
+- F5, unreadable footer: I chose rc 1 with "UNVERIFIED" over reporting success. That is the safe default for a stranger's machine. The cost is a false failure on a Devin build that never shows the model on screen.
+- F9: fixed rather than documented. Rungs from `OSRC_ESCALATE_LADDER` count as unnamed, because the user did not list them in the command they consented to.
+- F18: an `idle`/`composer`/`limit` screen with an empty composer counts as "plain idle". `limit` stays allowed because the old banner usually remains above a ready composer after the reset; a menu or prompt replaces the composer and is refused.
+- F19: an orphan note, not a late registrar (reason in F19). The user dismisses it with `rm`; I added no new subcommand.
+- `outsourcerer.sh` is the same length as on the base (18828 lines). Every new function went into `lib/`; the engine changed only on existing lines.
+
+## Needs from other lanes
+- `lib/disk_policy.sh` owners (disk lane): none. F6 was fixed at engine start, not in the disk lib. Its header line saying no env var opens the gate is true again.
+- Supervise/stop-guard lane: none. `lib/supervise.sh` was not touched. F18's new `approval` row (src `watcher`) goes through `_sv_append` like every other row.

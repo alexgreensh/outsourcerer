@@ -277,7 +277,7 @@ unset OSRC_PROVIDER_INJECTED
 # parents pass it to children explicitly (bg -> preflight/job child). Every command entry
 # point rebuilds it before dispatch, so an inherited value is always overwritten; it is a
 # display hint the gate never executes.
-unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
+unset OSRC_SPEND_OK OSRC_SPEND_GATE OSRC_CAP_GATE _OSRC_DISK_OVERRIDE_OK _OSRC_SPEND_BOUND_LANE _OSRC_SPEND_BOUND_MODEL _OSRC_SPEND_BOUND_SET _OSRC_PREFLIGHT_PAIR
 # OpenRouter escalation chain for cc/codex when no explicit -m is given (all support tool-calling).
 # Lead with a model that currently EXISTS. tencent/hy3:free was first here and returns HTTP 404
 # model_not_found, so every OpenRouter delegation opened by calling a dead model and paid a wasted
@@ -924,7 +924,7 @@ _devin_free_own_quota() { # <model> <text>
 # bash-native, captures output safely, and returns 124 when the bound fires.
 _devin_free_probe() {
   local model
-  model="$(_devin_probe_pick "${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}")" || { echo "every Devin probe model is on your exclude list; probe skipped" >&2; return 3; }
+  model="$(_devin_probe_pick "${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}")" || { echo "no Devin probe model is proven free (excluded, or the live catalog does not mark it Free); probe skipped" >&2; return 3; }
   _timeout "${OSRC_DEVIN_PROBE_SECS:-30}" \
     devin --model "$model" --permission-mode auto --respect-workspace-trust false -p PONG </dev/null
 }
@@ -968,7 +968,7 @@ _lane_free_probe() {
     : > "$out" 2>/dev/null && chmod 600 "$out" 2>/dev/null || out=""
   fi
   model="$(_devin_probe_pick "${2:-${OSRC_DEVIN_PROBE_MODEL:-glm-5-2}}")" || {
-    [ -n "$out" ] && printf 'every Devin probe model is on your exclude list\n' > "$out"
+    [ -n "$out" ] && printf 'no Devin probe model is proven free (excluded, or not catalog Free)\n' > "$out"
     printf 'unreachable'; return 0; }
   if ! have devin; then
     [ -n "$out" ] && printf 'devin CLI not on PATH\n' > "$out"
@@ -3079,7 +3079,7 @@ resolve_tier() {
 # FIRST and falls back to its legacy `case` arm for unported lanes; the fallback
 # arms retire as each lane lands.
 # =============================================================================
-OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"
+OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"; unset _OSRC_LT_KEY   # never inherited (with _OSRC_LF_* it would stand in for the descriptors)
 
 # The registry as one table (_OSRC_LF_<lane>__<field>), built once per process right after the last
 # descriptor and rebuilt only if OSRC_LANE_REGISTRY changes: lookups are fork-free (a launch did 536 forked reads).
@@ -3087,7 +3087,7 @@ OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi
 _lane_table() {
   [ "${_OSRC_LT_KEY:-}" = "$OSRC_LANE_REGISTRY" ] && return 0
   local _l _v
-  [ -z "${_OSRC_LT_KEY:-}" ] || for _v in $(compgen -v _OSRC_LF_ 2>/dev/null); do unset "$_v"; done   # a changed registry starts clean
+  for _v in $(compgen -v _OSRC_LF_ 2>/dev/null); do unset "$_v"; done   # always start clean: first-value-wins must never keep an inherited value
   printf() { # shellcheck disable=SC2059
     if [ "$1" = '%s\n' ]; then shift; local x f; for x in "$@"; do
         f="${x%%=*}"; case "$f" in ''|*[!a-z0-9_]*) continue ;; esac
@@ -11554,7 +11554,7 @@ cmd_explain() {
 }
 
 cmd_status() {
-  _mark_watched "${1:-}"
+  _mark_watched "${1:-}"; [ -n "${1:-}" ] || _cloudrun_orphans 2>/dev/null   # lib/cloudrun.sh: failed cloud launches that may still bill
   local id="${1:-}"
   # A bare status used to call _status_line for every historical job.  Each line
   # reconciles state and may inspect logs/PIDs, so a large jobs directory turns a
@@ -15925,8 +15925,7 @@ _managed_session_model() { # <session-id> [model-name/filter]
   _managed_endpoint_live "$session_id" "$pane" || { _endpoint_mutation_unlock "$key"; return 1; }
   case "$prov" in
     devin|dv)
-      tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }
-      sleep 1
+      tmux send-keys -t "$pane" Escape || { _endpoint_mutation_unlock "$key"; return 1; }; sleep 1
       tmux send-keys -t "$pane" M-m || { _endpoint_mutation_unlock "$key"; return 1; }
       sleep 1
       if [ -n "$filter" ]; then
@@ -15935,6 +15934,7 @@ _managed_session_model() { # <session-id> [model-name/filter]
         sleep 1
       fi
       tmux send-keys -t "$pane" Enter || { _endpoint_mutation_unlock "$key"; return 1; }
+      [ -z "$filter" ] || _osrc_dv_model_verify "$pane" "$filter" || rc=1   # fuzzy pick: confirm the gated id (lib/spend-paths.sh)
       ;;
     cc|claude)
       # Claude-native uses the /model picker; a target model name is required (there is no blind switch).
@@ -18225,7 +18225,7 @@ $feedback"
     # Every attempt would then see the same pre-edit failure, the stall guard would fire, and the loop
     # would report `blocked` while the real work landed in the background, unwatched. The loop is its
     # own supervisor and is the thing meant to be long-running, so it always waits in the foreground. Loop consent rides argv.
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
     _osrc_loop_needs_approval verify "$lid" "$ldir" "$attempt" "$0 --spend-ok loop resume $lid" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     # Defense in depth: if a delegate ever detaches anyway, the check below would silently grade stale
     # files. Refuse to grade rather than emit a confident wrong verdict.
@@ -18473,8 +18473,8 @@ $feedback"
     # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so the check would grade
     # unwritten files — and a false failure would also spend the next rung's money. The loop always waits.
     local _a0 _ael; _a0=$(date +%s)
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
-    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
+    rm -f "$ldir/attempt-$attempt.rc"; OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $(_osrc_escalate_spend_ok "$rung") "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || echo "$?" > "$ldir/attempt-$attempt.rc"
+    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "$(_osrc_escalate_next "$rung")" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     _ael=$(( $(date +%s) - _a0 ))
     local _skip_check=0 _result=fail cout="" crc=0
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
