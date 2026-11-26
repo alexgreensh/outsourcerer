@@ -73,3 +73,7 @@ mktemp template in test_spend_attack). All 4 are fixed in 182061e.
   pattern (`_OSRC_LIBEND_*` + `_osrc_spend_libs_ok`) can be extended to them.
 - Factory owners: per-task `spend_ok` fields written at `task new` time would make F5 exact rather than
   first-task-binds.
+
+## Round 2
+
+In progress (live-test findings 3, 5, 6, 7, 8, 16, 18; fail-closed second loader; hermetic r3.4; factory per-task consent).
