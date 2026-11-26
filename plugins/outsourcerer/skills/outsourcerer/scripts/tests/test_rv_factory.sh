@@ -122,5 +122,19 @@ if on F56; then
   [ "$rc" = 0 ] && [ "$(_task_list p56 | jq length)" = 2 ] && ok "F56: rerunning the same list finishes a plan whose first add failed" || bad "F56: rerun rc=$rc: $o2"
 fi
 
+if on F57; then
+  # The engine's die exits, so `$2` is never reached today (checked first). The finding's case is a die
+  # that returns (a caller or harness that redefines it): the option loop must still stop, not read $2.
+  printf 'a | do a\n' > "$TMP/l57"
+  for opt in --goal --max-parallel; do
+    o="$( set -u; start p57 "$TMP/l57" "$opt" )"
+    case "$o" in *"unbound variable"*) bad "F57: $opt as the last argument aborts: $o" ;;
+      *"$opt needs a value"*) ok "F57: $opt as the last argument gives the usage error" ;; *) bad "F57: $opt last: $o" ;; esac
+    o="$( set -u; die() { echo "ERROR: $*" >&2; return 1; }; start p57 "$TMP/l57" "$opt"; echo "rc=$?" )"
+    case "$o" in *"unbound variable"*) bad "F57: $opt last, with a die that returns: aborts on an unbound \$2" ;;
+      *"$opt needs a value"*"rc=1"*) ok "F57: $opt last, with a die that returns: usage error and rc 1" ;; *) bad "F57: $opt last, returning die: $o" ;; esac
+  done
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

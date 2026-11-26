@@ -117,8 +117,8 @@ cmd_plan_start() {
   local -a args
   while [ $# -gt 0 ]; do
     case "$1" in
-      --goal) _factory_optval "$1" $#; goal="$2"; shift 2 ;;
-      --max-parallel) _factory_optval "$1" $#; max="$2"; shift 2 ;;
+      --goal) _factory_optval "$1" $# || return 1; goal="$2"; shift 2 ;;
+      --max-parallel) _factory_optval "$1" $# || return 1; max="$2"; shift 2 ;;
       --run) run=1; shift ;;
       --dry-run) dry=1; shift ;;
       -h|--help) _osrc_fs_usage; return 0 ;;
