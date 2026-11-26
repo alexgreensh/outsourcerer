@@ -67,6 +67,16 @@ o="$(OSRC_HUB_EXPORT_STALE=2 osrc "$H" 'slow() { echo x >> "$OSRC_HOME/runs"; sl
   printf "runs=%s follower=%s leader=%s\n" "$(grep -c x "$OSRC_HOME/runs")" "$f" "$(cat "$OSRC_HOME/lead.out")"')"
 [ "$o" = 'runs=1 follower={"r":1} leader={"r":1}' ] && ok "one export ran; the follower printed its result" || bad "single flight: $o"
 
+echo "=== F28: a hub started for the same home spelled differently is ours ==="
+mkdir -p "$TMP/f28/real" "$TMP/f28/other"; ln -s "$TMP/f28/real" "$TMP/f28/link"
+sleep 300 </dev/null >/dev/null 2>&1 & P=$!; KILL="$KILL $P"
+for oh in "$TMP/f28/real/" "$TMP/f28/link"; do
+  OSRC_HOME="$oh" OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1; _osrc_mc_hub_ours "$1" "python3 hub_server.py --osrc-home=$2 --port 1"' "$SRC" "$P" "$TMP/f28/real" \
+    && ok "home $oh owns a hub started with --osrc-home=<real>" || bad "home $oh: hub not ours"
+done
+OSRC_HOME="$TMP/f28/other" OSRC_SOURCED=1 bash -c '. "$0" >/dev/null 2>&1; _osrc_mc_hub_ours "$1" "python3 hub_server.py --osrc-home=$2 --port 1"' "$SRC" "$P" "$TMP/f28/real" \
+  && bad "another home claimed the hub" || ok "a different home is still not ours"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"

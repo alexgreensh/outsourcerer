@@ -74,7 +74,9 @@ _osrc_mc_hub_ours() {
   [ -n "$cmd" ] || return 0
   case "$cmd" in *hub_server.py*) ;; *) return 1 ;; esac
   case "$cmd" in *--osrc-home=*) oh="${cmd#*--osrc-home=}" ;; *--osrc-home\ *) oh="${cmd#*--osrc-home }" ;; *) return 1 ;; esac
-  [ "${oh%% --*}" = "$OSRC_HOME" ]
+  oh="${oh%% --*}"; [ "$oh" = "$OSRC_HOME" ] && return 0
+  # the same directory spelled differently (trailing slash, symlink, /var vs /private/var) is ours too
+  oh="$(cd "$oh" 2>/dev/null && pwd -P)" && [ -n "$oh" ] && [ "$oh" = "$(cd "$OSRC_HOME" 2>/dev/null && pwd -P)" ]
 }
 # _osrc_mc_hub_live -> "<pid> <port>" of the hub serving this OSRC_HOME, rc 1 when none: serve.json names
 # a pid that is alive AND is our hub server (a recycled pid after a crash is not). Every opener and `mc`
