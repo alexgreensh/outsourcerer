@@ -507,7 +507,7 @@ _osrc_hub_lane_activity() {
   b="$(_osrc_hub_mt "$OSRC_JOBS/$id"/* "$OSRC_HOME/remote/$id.json" "$OSRC_HOME/review/items/$id"-*.json "$OSRC_HOME/autodetach/$id.log" "$OSRC_HOME/autodetach/$id.rc")"
   if [ -d "$OSRC_JOBS/$id" ]; then
     st="$(_osrc_hub_job_state "$id")"
-    case "$st" in running|live|working|launching|stalled\?|exploring\?|no-progress-writes) live=1 ;; esac
+    case "$st" in running|live|working|launching|exploring\?) live=1 ;; esac   # stalled?, no-progress-writes: not activity
   elif [ -f "$OSRC_HOME/remote/$id.json" ]; then
     type osrc_remote_state >/dev/null 2>&1 && [ "$(osrc_remote_state "$id" 2>/dev/null)" = live ] && live=1
   elif have tmux 2>/dev/null && ta="$(_osrc_hub_tmux_row "$id")" && [ -n "$ta" ]; then

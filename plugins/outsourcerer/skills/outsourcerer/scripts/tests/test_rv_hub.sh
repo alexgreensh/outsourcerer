@@ -142,5 +142,15 @@ if on F39; then
   [ "$r5" = ready ] && ok "F39: an Approved lane is ready to land, not working" || no "F39: Approved attention $r5"
 fi
 
+if on F40; then
+  # A stalled lane is not activity: the project's "no update for X h" alarm must be able to fire.
+  for st in 'stalled?' no-progress-writes running; do
+    id="f40-$(printf '%s' "$st" | tr -dc 'a-z')"; mkjob "$id" "$st"
+    lv="$(lib eval 'osrc_done_state() { echo not-done; }; _osrc_hub_lane_activity '"$id")"; lv="${lv##* }"
+    case "$st" in running) [ "$lv" = 1 ] && ok "F40: a running lane is live" || no "F40: running reads live=$lv" ;;
+      *) [ "$lv" = 0 ] && ok "F40: a $st lane is not live activity" || no "F40: $st reads live=$lv" ;; esac
+  done
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
