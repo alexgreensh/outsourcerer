@@ -515,6 +515,9 @@ _sv_remote_poll() { # <src>
 # Events in <file> between two byte offsets that belong to this orchestrator, as TSV:
 # prio ts kind target detail next id (id: the row's own, or ts/kind/target/detail for rows without). An event belongs when it carries this owner sid (so a target the
 # stop guard or supervise already pruned still replays) or names one of the given targets.
+# The targets a waiter reads besides its own rows: its lanes and supervise's own events. Card nags
+# are owner rows only (target `card` is shared by every session, so it is never in the set).
+_sv_target_set() { printf '%s\n' "$@" supervise | jq -R . | jq -cs .; }
 _sv_read_range() { # <file> <from> <to|-> <targets-json> <owner>
   [ -f "$1" ] || return 0
   { if [ "$3" = - ]; then tail -c +"$(( $2 + 1 ))" "$1"; else tail -c +"$(( $2 + 1 ))" "$1" | head -c "$(( $3 - $2 ))"; fi; } 2>/dev/null \
@@ -779,7 +782,7 @@ _sv_main() { # <sid> <once> [ids...]
     done
     _sv_remote_poll supervise
     seen="$(printf '%s\n' $seen $targets | sort -u | tr '\n' ' ')"   # a target dropped mid-settle still has its event in this batch
-    tj="$(printf '%s\n' $seen supervise card | jq -R . | jq -cs .)"
+    tj="$(_sv_target_set $seen)"
     gen="$(_sv_num "$(cat "$(_sv_lanes)/events.gen" 2>/dev/null)" 0)"
     if [ "$cgen" != "$gen" ]; then
       [ "$cgen" = $(( gen - 1 )) ] && older="$older$(_sv_read_range "$f.1" "$cursor" - "$tj" "$sid")"

@@ -36,6 +36,14 @@ printf 'reading the parser\n' > "$jd/progress"
 o="$(osrc "$H" "_status_line $J")"
 grep -q "^$J running .*reading the parser" <<<"$o" && ok "running job shows its progress" || bad "status: $o"
 
+echo "=== F21: a card nag reaches only the session that owns the card ==="
+H="$(home f21)"
+o="$(osrc "$H" '_sv_append card card "card for project-a is stale" "x hub report" supervise sess-a
+  tj="$(_sv_target_set lane-b)"
+  printf "B:%s\n" "$(_sv_read_range "$OSRC_HOME/lanes/events.jsonl" 0 - "$tj" sess-b | cut -f3)"
+  printf "A:%s\n" "$(_sv_read_range "$OSRC_HOME/lanes/events.jsonl" 0 - "$(_sv_target_set lane-a)" sess-a | cut -f3)"')"
+grep -qx 'B:' <<<"$o" && grep -qx 'A:card' <<<"$o" && ok "session B does not get session A's card nag; A does" || bad "card routing: $o"
+
 # ---- remote watcher (lib/remote.sh): a local bare repo is the remote, the clock is fake --------
 RH="$TMP/rstate"; mkdir -p "$RH" "$TMP/rwork"
 REMOTE="$TMP/remote.git"; WORK="$TMP/rwork/w"
