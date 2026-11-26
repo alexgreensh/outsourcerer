@@ -955,7 +955,7 @@ cmd_hub_mc() {
   # A live hub is reused only when it runs THIS engine: an older install's server (or another
   # checkout's) answers the token probe and keeps serving old code and old bugs (0.17.5).
   # _osrc_mc_stale_hub kills only a process verified as this OSRC_HOME's hub server.
-  type _osrc_mc_hub_reuse >/dev/null 2>&1 && { _osrc_mc_hub_reuse "${url:+$p}" || url=""; }   # also stops a wedged hub of ours (lib/mc_alive.sh)
+  local ru; type _osrc_mc_hub_reuse >/dev/null 2>&1 && { ru="$(_osrc_mc_hub_reuse "${url:+$p}")" && url="${ru:-$url}" || url=""; }   # also stops a wedged hub of ours (lib/mc_alive.sh)
   if [ -z "$url" ]; then
     mkdir -p "$OSRC_HOME/hub" && chmod 700 "$OSRC_HOME/hub" 2>/dev/null
     [ -L "$log" ] && die "mc: $log is a symlink, refusing to write it"

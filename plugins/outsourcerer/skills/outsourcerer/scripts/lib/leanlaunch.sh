@@ -17,6 +17,22 @@ _session_launch_cc() {
   _session_cc_mcp_flags
 }
 
+# _session_mcp_mode -> lean|full, the mode this shell's environment asks for (as _session_cc_mcp_flags
+# reads it). Session start records it; relaunch restores the recorded one (_session_mcp_restore).
+_session_mcp_mode() {
+  if [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ]; then printf lean
+  elif [ "${OSRC_CLAUDE_USER_CONFIG:-0}" = 1 ] || [ "${OSRC_SESSION_MCP:-lean}" = full ]; then printf full
+  else printf lean; fi
+}
+# _session_mcp_restore <session-id>: the MCP mode the session started with wins over the relaunching
+# shell's environment (registry start record, field 6). Records without it keep the environment's.
+_session_mcp_restore() {
+  case "$(_session_record "$1" 2>/dev/null | cut -f6)" in
+    full) OSRC_SESSION_MCP=full; OSRC_LEAN_LAUNCH=0 ;;
+    lean) OSRC_SESSION_MCP=lean; OSRC_CLAUDE_USER_CONFIG=0 ;;
+  esac
+}
+
 # _session_mcp_copy -> the private per-session copy of the declared MCP config. It can hold server env
 # tokens, so _session_registry_end (every stop, exit and failed launch) removes it.
 _session_mcp_copy() { printf '%s/sessions/mcp-%s.json' "$OSRC_HOME" "${SESSION_NAME:-$$}"; }
@@ -28,7 +44,7 @@ _session_cc_mcp_flags() {
   local mode="${OSRC_SESSION_MCP:-lean}"
   [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || mode=full
   case "$mode" in
-    full) [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ] || return 0
+    full) [ "${OSRC_LEAN_LAUNCH:-0}" = 1 ] || { echo "[outsourcerer] MCP servers: full (your configured set)" >&2; return 0; }
       [ "${OSRC_CLAUDE_USER_CONFIG:-0}" != 1 ] || die "lean launch requires strict MCP isolation; unset OSRC_CLAUDE_USER_CONFIG or OSRC_LEAN_LAUNCH" ;;
     lean|'') ;;
     *) die "OSRC_SESSION_MCP must be lean or full (got '${OSRC_SESSION_MCP}')" ;;
@@ -36,6 +52,7 @@ _session_cc_mcp_flags() {
   if [ -n "${OSRC_LEAN_MCP_CONFIG:-}" ]; then
     [ -f "$OSRC_LEAN_MCP_CONFIG" ] && jq -e '.mcpServers | type == "object"' "$OSRC_LEAN_MCP_CONFIG" >/dev/null 2>&1 || die "lean launch: invalid MCP config"
     SESSION_LAUNCH+=(--strict-mcp-config --mcp-config "$OSRC_LEAN_MCP_CONFIG")
+    echo "[outsourcerer] MCP servers: lean, from OSRC_LEAN_MCP_CONFIG" >&2
     return 0
   fi
   # Declared servers (--with mcp=a,b): reuse the headless lanes' filter, then keep a private copy that
@@ -46,9 +63,11 @@ _session_cc_mcp_flags() {
     _mkdir_private "$OSRC_HOME/sessions" 2>/dev/null || mkdir -p "$OSRC_HOME/sessions" || die "lean launch: cannot write $OSRC_HOME/sessions"
     ( umask 077; cp "${CC_MCP_FLAGS[2]}" "$cfg" ) || die "lean launch: cannot write $cfg"
     SESSION_LAUNCH+=(--strict-mcp-config --mcp-config "$cfg")
+    echo "[outsourcerer] MCP servers: lean, only those declared with --with mcp=" >&2
     return 0
   fi
   SESSION_LAUNCH+=(--strict-mcp-config --mcp-config '{"mcpServers":{}}')
+  echo "[outsourcerer] MCP servers: none (lean default). A brief that needs a connector: --with mcp=<names>, or OSRC_SESSION_MCP=full" >&2
 }
 
 # A new pane may still have canonical terminal input enabled when send-keys arrives.

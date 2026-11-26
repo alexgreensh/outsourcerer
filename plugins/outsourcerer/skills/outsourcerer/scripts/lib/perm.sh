@@ -519,6 +519,8 @@ _osrc_perm_restore_profile() {
   _ps_saved="$(_session_record "$1" 2>/dev/null | cut -f5)"
   case "$_ps_saved" in safe|default) PERM_PROFILE="$_ps_saved" ;; *) PERM_PROFILE="${PERM_PROFILE:-${OSRC_PERM_PROFILE:-default}}" ;; esac
   case "$PERM_PROFILE" in safe|default) ;; *) PERM_PROFILE=default ;; esac
+  type _session_mcp_restore >/dev/null 2>&1 && _session_mcp_restore "$1"   # and its MCP mode (lib/leanlaunch.sh)
+  return 0
 }
 
 # ---- session relaunch vectors (moved from outsourcerer.sh for the size ratchet) ---
@@ -583,7 +585,7 @@ _session_relaunch_cc() {
   printf '%s' "$suffix"
   if [ -n "$flag" ] && _session_cc_effort_supported; then printf ' --effort %q' "$flag"; fi
   # Lean like session start (lib/leanlaunch.sh): the declared copy if this session has one, else no servers.
-  [ "${OSRC_SESSION_MCP:-lean}" = full ] && [ "${OSRC_LEAN_LAUNCH:-0}" != 1 ] && return 0
+  [ "$(_session_mcp_mode)" = full ] && return 0   # the recorded mode, restored by _osrc_perm_restore_profile
   local mc; mc="$(_session_mcp_copy)"; [ -f "$mc" ] || mc='{"mcpServers":{}}'
   printf ' --strict-mcp-config --mcp-config %q' "$mc"
 }

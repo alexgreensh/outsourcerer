@@ -179,8 +179,8 @@ per=$(( (c5 - c1) / 4 ))
 [ "$per" -le 1 ] && ok "a throttled pass reads each lane file with one jq ($per per lane; $c5 for 5 lanes)" || no "throttled pass: $per jq per lane ($c1 for 1, $c5 for 5)"
 fresh 8b; mkdir -p "$OSRC_HOME/remote"; lane s1 "url:https://claude.ai/code/session_x1"; lane s2 ""
 ev="$(OSRC_NOW="$N0" S 'osrc_remote_events' 2>/dev/null)"
-grep -q '^EVENT stalled s1 .*no push yet after 60m (session https://claude.ai/code/session_x1 is live' <<<"$ev" && ! grep -q 'EVENT failed s1' <<<"$ev" \
-  && ok "a lane whose vehicle reported a live session is quiet (stalled), not 'failed: never started'" || no "live-session lane: $ev"
+grep -q '^EVENT stalled s1 .*no push yet after 60m (the launch reported session https://claude.ai/code/session_x1;' <<<"$ev" && ! grep -q 'EVENT failed s1' <<<"$ev" \
+  && ok "a lane whose launch reported a session is quiet (stalled), not 'failed: never started'" || no "live-session lane: $ev"
 grep -q '^EVENT failed s2 .*never started' <<<"$ev" && ok "a launch with no session URL still reports never started" || no "no-session lane: $ev"
 [ "$(S 'osrc_remote_state s1')" = live ] && ok "osrc_remote_state still answers from the one-jq record" || no "state: $(S 'osrc_remote_state s1')"
 

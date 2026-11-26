@@ -11168,7 +11168,7 @@ _status_line() {
   if [ "$(cat "$jd/supervision" 2>/dev/null)" = "not-armed" ] && ! _heartbeat_leader_alive; then
     flag="$flag !SUPERVISION:NOT-ARMED"
   fi
-  [ "$st" = running ] && prog="$(_osrc_disk_paused_note "$id" 2>/dev/null)" && st=paused   # SIGSTOPped
+  if [ "$st" = running ] && _w="$(_osrc_disk_paused_note "$id" 2>/dev/null)"; then prog="$_w"; st=paused; fi   # SIGSTOPped
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
@@ -16186,7 +16186,7 @@ _fleet_cc_session_for_pane() { # <pane-pid> <cwd> -> sessionId<TAB>pid
 }
 
 _session_registry_append() { # <event> <provider> <model> <effort> <state> <receipt> [resolved-model] [generation] [lock-held]
-  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" lock_held="${9:-0}" now record pid="" pid_start="" engine_pid="" engine_pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0 previous="" perm_profile=""
+  local event="$1" provider="$2" model="$3" effort="$4" state="$5" receipt="$6" resolved="${7:-}" generation="${8:-1}" lock_held="${9:-0}" now record pid="" pid_start="" engine_pid="" engine_pid_start="" cc_match="" cc_session_id="" cc_pid="" tries=0 previous="" perm_profile="" mcp_mode=""
   local probe_ticks="${OSRC_CC_SPAWN_PROBE_TICKS:-10}" physical_cwd=""
   have jq || return 1
   [ -n "$resolved" ] || resolved="$(_session_resolved_model "$provider" "$model")" || return 1
@@ -16196,7 +16196,7 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
     # relaunch` / effort relaunch rebuild the command and must reproduce it, so it is
     # recorded on every start event (default when the session was launched without
     # --perm, which is every pre-perm-profile record too — they simply lack the field).
-    case "${PERM_PROFILE:-default}" in safe|default) perm_profile="${PERM_PROFILE:-default}" ;; *) perm_profile="default" ;; esac
+    case "${PERM_PROFILE:-default}" in safe|default) perm_profile="${PERM_PROFILE:-default}" ;; *) perm_profile="default" ;; esac; case "$provider" in cc|claude) mcp_mode="$(_session_mcp_mode 2>/dev/null)" ;; esac
     pid="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null)" || pid=""
     [ -n "$pid" ] && pid_start="$(_pid_start_identity "$pid" 2>/dev/null)" || pid_start=""
     if [ -n "$pid" ]; then
@@ -16243,8 +16243,8 @@ _session_registry_append() { # <event> <provider> <model> <effort> <state> <rece
   case "$perm_profile" in safe|default) ;; *) perm_profile="" ;; esac
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   record="$(jq -cn --arg event "$event" --arg session_id "$SESSION_NAME" --arg provider "$provider" \
-    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$physical_cwd" --arg ts "$now" --arg perm_profile "$perm_profile" --argjson generation "$generation" \
-    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,perm_profile:(if $perm_profile=="" then null else $perm_profile end),endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),engine_pid:(if $engine_pid=="" then null else $engine_pid end),engine_pid_start:(if $engine_pid_start=="" then null else $engine_pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),cwd:(if $cwd=="" then null else $cwd end),owner:"managed",ts:$ts}')" || return 1
+    --arg model "$model" --arg resolved_model "$resolved" --arg effort "$effort" --arg state "$state" --arg receipt "$receipt" --arg pid "$pid" --arg pid_start "$pid_start" --arg engine_pid "$engine_pid" --arg engine_pid_start "$engine_pid_start" --arg cc_session_id "$cc_session_id" --arg cc_pid "$cc_pid" --arg cwd "$physical_cwd" --arg ts "$now" --arg perm_profile "$perm_profile" --arg mcp_mode "$mcp_mode" --argjson generation "$generation" \
+    '{schema_version:"1",event:$event,session_id:$session_id,provider:$provider,model:$model,requested_model:$model,resolved_model:$resolved_model,model_generation:$generation,effort:$effort,state:$state,receipt:$receipt,perm_profile:(if $perm_profile=="" then null else $perm_profile end),mcp_mode:(if $mcp_mode=="" then null else $mcp_mode end),endpoint:("tmux:" + $session_id),harness_pid:(if $pid=="" then null else $pid end),pid_start:(if $pid_start=="" then null else $pid_start end),engine_pid:(if $engine_pid=="" then null else $engine_pid end),engine_pid_start:(if $engine_pid_start=="" then null else $engine_pid_start end),cc_session_id:(if $cc_session_id=="" then null else $cc_session_id end),cc_pid:(if $cc_pid=="" then null else ($cc_pid|tonumber) end),cwd:(if $cwd=="" then null else $cwd end),owner:"managed",ts:$ts}')" || return 1
   if [ "$lock_held" = 1 ]; then
     _state_append_locked "$OSRC_SESSION_REGISTRY" "$record"
   else

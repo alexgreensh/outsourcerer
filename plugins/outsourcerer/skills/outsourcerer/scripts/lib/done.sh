@@ -366,7 +366,7 @@ _session_current_generation() { # <session-id>
 # Field 5 (perm_profile) is "default" for records written before perm profiles or without --perm.
 _session_record() { # <session-id>
   _state_jsonl_read "$OSRC_SESSION_REGISTRY" 2>/dev/null | jq -r --arg id "$1" \
-    'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring), (.perm_profile // "default")] | @tsv' | tail -1
+    'select(.event=="start" and .session_id==$id) | [.provider, .model, .effort, (.model_generation|tostring), (.perm_profile // "default"), (.mcp_mode // "")] | @tsv' | tail -1
 }
 
 # Validate session name before any path construction, tmux, or rm use.
