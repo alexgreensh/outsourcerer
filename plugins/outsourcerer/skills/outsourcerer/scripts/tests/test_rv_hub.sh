@@ -199,5 +199,13 @@ if on F44; then
   [ "$ids" = '["D1","D2","keep","D4"]' ] && ok "F44: id-less decisions get D1, D2...; a given id is kept" || no "F44: ids $ids"
 fi
 
+if on F45; then
+  # A row whose text says "error" keeps the rail; only output that is not a JSON array is dropped.
+  a="$(lib eval '_osrc_hub_limits_cached() { printf "%s" "[{\"id\":\"cx\",\"name\":\"Codex\",\"state\":\"unknown\",\"note\":\"codex app-server refused: error\"}]"; }; cmd_hub_export' 2>/dev/null | jq -c '[.limits[].id]')"
+  b="$(lib eval '_osrc_hub_limits_cached() { printf "error: probe crashed"; }; cmd_hub_export' 2>/dev/null | jq -c '.limits')"
+  [ "$a" = '["cx"]' ] && ok "F45: a limits row whose note says 'error' stays on the rail" || no "F45: rail $a"
+  [ "$b" = '[]' ] && ok "F45: output that is not a JSON array still empties the rail" || no "F45: bad output gave $b"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

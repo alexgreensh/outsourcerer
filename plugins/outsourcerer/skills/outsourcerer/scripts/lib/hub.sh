@@ -835,7 +835,7 @@ _osrc_hub_export_run() {
   fi
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "projects.done"
   local limits; if type _osrc_hub_limits_cached >/dev/null 2>&1; then limits="$(_osrc_hub_limits_cached)"; else limits="$(_osrc_hub_limits 2>/dev/null)"; fi
-  case "$limits" in ''|*'error'*) limits='[]' ;;esac; ! type _osrc_hub_limits_fresh >/dev/null 2>&1 || limits="$(_osrc_hub_limits_fresh <<<"$limits")"   # renews from renews_at, now
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$limits" || limits='[]'; ! type _osrc_hub_limits_fresh >/dev/null 2>&1 || limits="$(_osrc_hub_limits_fresh <<<"$limits")"   # renews from renews_at, now
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "limits.done"
   # Re-read the queued stale screens in ONE detached worker: off the export's clock and off its
   # tmux queue. Fork now, while the memoised raw reader still exists.
