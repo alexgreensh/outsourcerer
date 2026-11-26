@@ -47,10 +47,12 @@ Every loop used the same conditions:
 |---|---|---|
 | Brief's recipe, no cleaner, 40 runs | base `5769ef9` | 0 incident-3 failures. 1 run timed out in the foreground-lane block (see below). |
 | Same, plus the simulated cleaner, 8 runs | base `5769ef9` | 7 of 7 completed runs fail with the Mac's exact four lines. Two more lines also fail: the report check (gone's files were already deleted before the report) and the empty-lock-owner check (that test also aged a file with `touch -t 2020`). The 8th run timed out in the foreground-lane block. |
-| Same, plus the cleaner, 8 runs | this branch | AFTER_SWEEP |
-| Brief's recipe, no cleaner, 40 runs | this branch | AFTER_PLAIN |
+| Same, plus the cleaner, 8 runs | this branch (final) | 8 of 8 green (98/98). |
+| Brief's recipe, no cleaner, 40 runs | this branch (final) | **40 of 40 green (98/98), no hang.** |
 
-So the reproduction rate goes from 7 of 7 completed runs (base, with the cleaner) to 0 (fixed).
+So the reproduction rate goes from 7 of 7 completed runs (base, with the cleaner) to 0 of 8 (fixed). An
+earlier version of this branch, before the pause-record fix below, passed incident 3 in all 37 of its
+40 runs that completed and hung in 3 (so 8 hangs in 48 base and early runs, 0 in 48 final runs).
 Without a cleaner, the base did not fail incident 3 in 40 runs. That matches the Mac's rate of 1 in
 11, which depended on when the test ran.
 
@@ -98,11 +100,49 @@ Without a cleaner, the base did not fail incident 3 in 40 runs. That matches the
 
 ## Tests (commands, exit codes)
 
-TESTS
+Every suite below except conformance was run alone with `nice bash tests/<suite>.sh`, from
+`plugins/outsourcerer/skills/outsourcerer/scripts`, on the final code:
+
+| Suite | rc | Result |
+|---|---|---|
+| test_disk_r3 | 0 | 10 passed. On base `5769ef9`: rc 1, 7 failed (cases 1, 2 and 4). |
+| test_disk_settings_lint | 0 | 3 passed. On base: rc 1, flags `test_disk_policy.sh:403`. |
+| test_disk_policy | 0 | 98 passed, in each of the 48 final loop runs. |
+| test_disk_r2 | 0 | 22 passed. |
+| test_disk_gate_failsafe | 0 | 52 passed. |
+| test_cleanup_manifest | 0 | 85 passed. |
+| test_no_pipe_grep_q | 0 | |
+| test_shell_scratch (python) | 0 | 11 OK. Run after the fix below. |
+
+The loops ran `scratchpad/loop.sh <n> <tag> 4` under the conditions listed in the reproduction
+section. They are described there.
+
+Conformance (`nice bash tests/conformance.sh`), run once, on `23ea828`: **rc=1**, `264 passed, 4 failed, 14 skipped`.
+- `test_shell_scratch` failed because of my new lint suite: it did not source `lib_scratch.sh`.
+  I fixed that in the last commit, and the suite (11 OK) and the lint (3/3) now pass alone. I did not
+  rerun the full conformance.
+- `test_harness_isolation`, `test_vocab_hygiene` and `test_parity_insource_refresh` fail because the
+  container runs as uid 0. I ran each on the base `5769ef9`, and each fails there too (rc 1). Round 2 reported the same.
 
 ## Pre-existing, not fixed: the foreground-lane block can hang
 
-FGHANG
+**Fixed. This was the second real product bug.** The base hung in 1 of 40 runs (and 1 of 8 with the
+cleaner) in the second foreground case ("paused foreground lane survives its guard's hard cap"). I
+added a process dump on timeout to the loop. It showed the lane's children SIGSTOPped
+(`T`) after the "resume", while the block's monitor was alive. The cause is in
+`_osrc_disk_pause_reg` and `_osrc_disk_pause_job`. Each checks that no record exists, then reads
+the pids already recorded, then writes its record with `mv -f`. Two overlapping sweeps (here the
+test's direct tick and the block's monitor tick, both reading `$FREEF`) can therefore interleave:
+the second sweep lists only the pids the first sweep had not listed and overwrites the first sweep's
+record with that list. The first sweep's processes are then stopped with no record naming them, so
+nothing resumes them. In production only one monitor ticks (the lock), but overlap is possible
+during a stale-lock takeover, and the result is a lane frozen for good.
+
+`_osrc_disk_rec_write` now creates the record exclusively: it writes the complete temp file and then
+hard-links it (`ln`). Where links are unsupported, it falls back to a noclobber claim followed by a
+rename. A record that already exists returns 2, and the sweep treats that as "already paused". I
+added a regression check to `test_disk_r3.sh` (case 4); it fails on the base. The existing
+"no record -> job left running" check now stubs `ln` as well as `mv`. After this fix: 0 hangs in 48 runs.
 
 ## What remains unproven
 
@@ -130,3 +170,13 @@ FGHANG
   cleanup.log)."
 - **Anyone writing tests**: never set fixture timestamps days into the past under `$TMPDIR`; the OS
   cleaner may delete them mid-run. Hours are enough for cleanup's 1h rule.
+
+## Reproduction harness (not committed; outside the repo)
+
+- `df` stub on PATH: prints `fake 524288000 519045120 5242880 99% /`.
+- `git` and `rm` shims log every `worktree remove`, `branch -D`, `update-ref -d` and `worktree prune`,
+  and every `rm` of `repo/` or `reclaim/`, with the caller's command line. Then they exec the real tool.
+- CPU stress: 4 × `while :; do :; done`.
+- Cleaner stand-in: `while :; do find /tmp/r3real -type f -atime +3 -delete; sleep 0.5; done`.
+- Loop: 4 runs in parallel, with `TMPDIR=/tmp/r3l` (a symlink to `/tmp/r3real`), `setsid nice bash
+  test_disk_policy.sh`. A 900 s watchdog dumps `ps --forest` before it kills a hung run.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # test_disk_settings_lint.sh -- static check: no test removes disk-policy/settings and carries on
 # without writing new floors. Without that file the floors come from the host's real disk, so a
 # block that follows decides on whatever the machine happens to have free (reports/osrc-fx-disk-r3.md:
@@ -31,7 +32,7 @@ ok()  { echo "PASS: $1"; pass=$((pass+1)); }
 bad() { echo "FAIL: $1"; fail=$((fail+1)); }
 
 # The check must catch the bad shape and pass the good ones, or it proves nothing.
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/.disklint.XXXXXX")" || { echo "FAIL: no scratch dir"; exit 1; }
+TMP="$(mktemp -d "${TMPDIR%/}/.disklint.XXXXXX")" || { echo "FAIL: no scratch dir"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 printf '%s\n' 'x=1' 'rm -f "$RH/disk-policy/settings"' 'n="$(osrc "$RH" _osrc_disk_reclaim)"' > "$TMP/bad.sh"
 printf '%s\n' 'rm -f "$RH/disk-policy/settings"; settings "$RH"' \
