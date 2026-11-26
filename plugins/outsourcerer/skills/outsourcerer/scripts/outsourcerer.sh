@@ -11168,7 +11168,7 @@ _status_line() {
   if [ "$(cat "$jd/supervision" 2>/dev/null)" = "not-armed" ] && ! _heartbeat_leader_alive; then
     flag="$flag !SUPERVISION:NOT-ARMED"
   fi
-  [ "$st" = running ] && prog="$(_osrc_disk_paused_note "$id" 2>/dev/null)" && st=paused   # SIGSTOPped
+  if [ "$st" = running ] && _w="$(_osrc_disk_paused_note "$id" 2>/dev/null)"; then prog="$_w"; st=paused; fi   # SIGSTOPped
   prog="$(printf '%s' "$prog" | cut -c1-"${OSRC_PROG_WIDTH:-64}")"
   printf '%-22s %-8s %-6s %-16s %-12s %s\n' "$id" "$st" "$agetxt" "$model" "${acts:-—}$flag" "$prog"
 }
