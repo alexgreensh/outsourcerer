@@ -58,3 +58,17 @@ Base `cloud/osrc-int` @ 80575c4. Work in progress; sections are filled per findi
 - Fix (`lib/cloudrun.sh`): any launch that fails after the gate writes `cloud/<id>.orphan` (time, vehicle, what was seen, launch log). `_cloudrun_orphans` prints one `!! cloud <id>: an untracked <vehicle> session may exist … then: rm <note>` line per note, and a bare `status` calls it on every run (`outsourcerer.sh`, same line as `_mark_watched`). The die message names the note and says `status` lists it until cleared. I chose a note over tailing for a late link: a background registrar would need the whole registration context, and `lane add` would run after the command had already returned failure. Re-launching still requires the user.
 - Test: `tests/test_cloudrun.sh` (2 cases after the no-link launch): the note exists and `status` prints it; removing the note clears the warning. Base: 139/140 (no note). After: 140/140, rc 0.
 - Behaviour change, proposed release note: "A hosted-session launch that fails after you approved it now leaves `cloud/<id>.orphan`; `outsourcerer status` warns about it until you check the vehicle dashboard and remove the note."
+
+## Base verification (earlier work on `cloud/osrc-int`)
+I read `git log ea34fe0..HEAD` (100 commits; the base carries no `reports/*.md`) only as far as these findings touch it: the lane-table cache (`be7587f` and its predecessors), the session-model and send gates, the loop needs-approval path (live-test F5), the Devin probe pick, the cap gate's unread refusal, the watcher's limit continue and the cloud launch wait. Each defect found there is one of the findings above. I found nothing else wrong in those paths. I did not audit the other base commits.
+
+## Open questions (decided by the lane)
+- F5, unreadable footer: I chose rc 1 with "UNVERIFIED" over reporting success. That is the safe default for a stranger's machine. The cost is a false failure on a Devin build that never shows the model on screen.
+- F9: fixed rather than documented. Rungs from `OSRC_ESCALATE_LADDER` count as unnamed, because the user did not list them in the command they consented to.
+- F18: an `idle`/`composer`/`limit` screen with an empty composer counts as "plain idle". `limit` stays allowed because the old banner usually remains above a ready composer after the reset; a menu or prompt replaces the composer and is refused.
+- F19: an orphan note, not a late registrar (reason in F19). The user dismisses it with `rm`; I added no new subcommand.
+- `outsourcerer.sh` is the same length as on the base (18828 lines). Every new function went into `lib/`; the engine changed only on existing lines.
+
+## Needs from other lanes
+- `lib/disk_policy.sh` owners (disk lane): none. F6 was fixed at engine start, not in the disk lib. Its header line saying no env var opens the gate is true again.
+- Supervise/stop-guard lane: none. `lib/supervise.sh` was not touched. F18's new `approval` row (src `watcher`) goes through `_sv_append` like every other row.
