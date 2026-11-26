@@ -7,6 +7,7 @@
 # Panes are real Claude Code 2.1 captures (fixtures/supervise) served by a file-backed fake tmux.
 # Run: bash test_supervise.sh
 set -uo pipefail
+export OSRC_CARD_GUARD=0   # waiter logic only: a card-less owner is otherwise asked for its Mission Control card (lib/card_fresh.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"; FX="$SCRIPT_DIR/fixtures/supervise"
 [ -f "$SRC" ] || { echo "FAIL: cannot find $SRC"; exit 1; }
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }

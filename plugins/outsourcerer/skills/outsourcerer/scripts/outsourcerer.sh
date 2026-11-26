@@ -1081,6 +1081,8 @@ parse_model() {
       --cap)                [ -n "${2:-}" ] || die "--cap needs meter<=pct (e.g. --cap weekly<=40)"; OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }$2"; export OSRC_CAPS; shift 2 ;;
       --cap=*)              OSRC_CAPS="${OSRC_CAPS:+$OSRC_CAPS }${1#--cap=}"; export OSRC_CAPS; shift ;;
       --no-advise)          OSRC_NO_ADVISE=1; shift ;;   # opt out of auto-advise (parity with _consume_flags)
+      --wait|--foreground)  OSRC_NO_AUTODETACH=1; shift ;;   # parity with _consume_flags: honored there, never prompt text
+      --provider=*)         PROVIDER="${1#--provider=}"; [ -n "$PROVIDER" ] || die "--provider requires a name"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift ;;
       --cloud-ack)          OSRC_CLOUD_ACK=1; shift ;;
       --trust-lane)         [ -n "${2:-}" ] || die "--trust-lane needs a lane name (e.g. devin)"; OSRC_TRUST_LANE_ONCE="${OSRC_TRUST_LANE_ONCE:-} $2"; shift 2 ;;
       --provider)           [ -n "${2:-}" ] || die "--provider requires a name (devin|cc|codex|droid|cursor|hermes|warp|cline|pi|gemini|gm|claudex|local|tokenrouter|grokbot|opencode)"; PROVIDER="$2"; [ "${_OSRC_PROVIDER_INJECTED:-0}" = "1" ] || OSRC_PROVIDER_ARG=1; PROVIDER_EXPLICIT=1; shift 2 ;;
@@ -1731,16 +1733,11 @@ live_models() {
 # cash lane; a cost-unknown BYOK lane never wins on cost). OSRC_ADVISE_VALUE_BIAS (default `quality`)
 # reserves a future `savings` mode; today selection is quality-first with cost breaking the lane tie.
 
-# Lane whitelist: only the lanes that HAVE a live catalog (dv, warp, gm = Antigravity `agy models`,
-# gi = the Gemini API model list). A literal set closes any latent path-traversal from a future
-# caller passing an attacker-influenced lane string.
-# Descriptor-first: lanes that declare `catalog_lane` own a live catalog file; the
-# case below is the unported-lane fallback (literal set = path-traversal guard).
+# _catalog_path <lane> -> live catalog file; only `catalog_lane` lanes (+ dv): a literal set, no path traversal.
 _catalog_path() {
-  local _l _v
+  local _l
   for _l in $OSRC_LANE_REGISTRY; do
-    _v="$(_lane_field "$_l" catalog_lane 2>/dev/null)"
-    [ -n "$_v" ] && [ "$_v" = "${1:-}" ] && { printf '%s/catalogs/%s.json' "$OSRC_HOME" "$_v"; return 0; }
+    _lane_fv "$_l" catalog_lane && [ -n "$_OSRC_LV" ] && [ "$_OSRC_LV" = "${1:-}" ] && { printf '%s/catalogs/%s.json' "$OSRC_HOME" "$_OSRC_LV"; return 0; }
   done
   case "${1:-}" in dv) printf '%s/catalogs/%s.json' "$OSRC_HOME" "$1" ;; *) return 1 ;; esac
 }
@@ -3084,29 +3081,51 @@ resolve_tier() {
 # =============================================================================
 OSRC_LANE_REGISTRY="local dv gm cx or cc gi ci droid cursor hermes warp cline pi claudex tokenrouter grokbot opencode"
 
-# _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
-_lane_field() {
-  local l="${1:-}" f="${2:-}" line
-  case " $OSRC_LANE_REGISTRY " in *" $l "*) ;; *) return 1 ;; esac
-  while IFS= read -r line; do
-    case "$line" in "$f="*) printf '%s' "${line#*=}"; return 0 ;; esac
-  done <<_OSRC_LANE_FIELDS
-$(lane_descriptor_"$l" 2>/dev/null)
-_OSRC_LANE_FIELDS
-  return 1
+# The registry as one table (_OSRC_LF_<lane>__<field>), built once per process right after the last
+# descriptor and rebuilt only if OSRC_LANE_REGISTRY changes: lookups are fork-free (a launch did 536 forked reads).
+# _lane_table: a printf shim (this shell only) stores the descriptors' `printf '%s\n'` lines; first line wins.
+_lane_table() {
+  [ "${_OSRC_LT_KEY:-}" = "$OSRC_LANE_REGISTRY" ] && return 0
+  local _l _v
+  [ -z "${_OSRC_LT_KEY:-}" ] || for _v in $(compgen -v _OSRC_LF_ 2>/dev/null); do unset "$_v"; done   # a changed registry starts clean
+  printf() { # shellcheck disable=SC2059
+    if [ "$1" = '%s\n' ]; then shift; local x f; for x in "$@"; do
+        f="${x%%=*}"; case "$f" in ''|*[!a-z0-9_]*) continue ;; esac
+        _v="_OSRC_LF_${_l}__$f"; [ -n "${!_v+x}" ] || builtin printf -v "$_v" '%s' "${x#*=}"; done
+    else builtin printf "$@"; fi; }
+  for _l in $OSRC_LANE_REGISTRY; do
+    case "$_l" in *[!a-z0-9_]*) continue ;; esac
+    type "lane_descriptor_$_l" >/dev/null 2>&1 && "lane_descriptor_$_l"
+  done
+  unset -f printf
+  _OSRC_LT_KEY="$OSRC_LANE_REGISTRY"
 }
+
+# _lane_fv <lane> <field> -> _OSRC_LV = the value; rc1 when unregistered or unset.
+_lane_fv() {
+  local v
+  _OSRC_LV=""
+  case " $OSRC_LANE_REGISTRY " in *" ${1:-} "*) ;; *) return 1 ;; esac
+  case "${1:-}${2:-}" in ''|*[!a-z0-9_]*) return 1 ;; esac
+  _lane_table
+  v="_OSRC_LF_${1}__$2"; [ -n "${!v+x}" ] || return 1
+  _OSRC_LV="${!v}"
+}
+
+# _lane_field <lane> <field> -> the field's value, rc1 when unregistered or unset.
+_lane_field() { _lane_fv "${1:-}" "${2:-}" || return 1; printf '%s' "$_OSRC_LV"; }
 
 # _lane_by_token <lane-code|disp|legacy-alias> -> canonical lane name, rc1 unknown.
 # Lane context ONLY: provider names never live in name/aliases/disp, so `codex`
 # does not resolve here (it is or's transport provider, not a lane token).
 _lane_by_token() {
-  local t="${1:-}" l v pair
+  local t="${1:-}" l pair
   [ -n "$t" ] || return 1
   for l in $OSRC_LANE_REGISTRY; do
     [ "$l" = "$t" ] && { printf '%s' "$l"; return 0; }
-    v="$(_lane_field "$l" aliases)"; case " $v " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
-    v="$(_lane_field "$l" disp)"; [ "$v" = "$t" ] && { printf '%s' "$l"; return 0; }
-    _words_noglob "$(_lane_field "$l" disp_by_provider)"   # split WITHOUT globbing values against cwd (class-complete with the family/model_globs fix)
+    _lane_fv "$l" aliases; case " $_OSRC_LV " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
+    _lane_fv "$l" disp; [ "$_OSRC_LV" = "$t" ] && { printf '%s' "$l"; return 0; }
+    _lane_fv "$l" disp_by_provider; _words_noglob "$_OSRC_LV"   # split WITHOUT globbing values against cwd
     for pair in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$pair" in *"=$t") printf '%s' "$l"; return 0 ;; esac
     done
@@ -3122,11 +3141,11 @@ _lane_by_token() {
 # gate today because `cc` hits the `*` arm). Resolving `cc` here would silently
 # START gating those sessions, so canonical codes deliberately do not match.
 _lane_by_disp() {
-  local t="${1:-}" l v pair
+  local t="${1:-}" l pair
   [ -n "$t" ] || return 1
   for l in $OSRC_LANE_REGISTRY; do
-    v="$(_lane_field "$l" disp)"; [ "$v" = "$t" ] && { printf '%s' "$l"; return 0; }
-    _words_noglob "$(_lane_field "$l" disp_by_provider)"   # split WITHOUT globbing values against cwd (class-complete with the family/model_globs fix)
+    _lane_fv "$l" disp; [ "$_OSRC_LV" = "$t" ] && { printf '%s' "$l"; return 0; }
+    _lane_fv "$l" disp_by_provider; _words_noglob "$_OSRC_LV"   # split WITHOUT globbing values against cwd
     for pair in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$pair" in *"=$t") printf '%s' "$l"; return 0 ;; esac
     done
@@ -3140,7 +3159,7 @@ _lane_by_model_glob() {
   local m="${1:-}" l g
   [ -n "$m" ] || return 1
   for l in $OSRC_LANE_REGISTRY; do
-    _words_noglob "$(_lane_field "$l" model_globs 2>/dev/null)"   # split WITHOUT globbing the patterns against cwd
+    _lane_fv "$l" model_globs; _words_noglob "$_OSRC_LV"   # split WITHOUT globbing the patterns against cwd
     for g in ${WORDS[@]+"${WORDS[@]}"}; do
       case "$m" in $g) printf '%s' "$l"; return 0 ;; esac
     done
@@ -3148,54 +3167,33 @@ _lane_by_model_glob() {
   return 1
 }
 
-# _lane_by_provider <--provider value> -> canonical lane via the providers field.
-_lane_by_provider() {
-  local p="${1:-}" l v
-  [ -n "$p" ] || return 1
-  for l in $OSRC_LANE_REGISTRY; do
-    v="$(_lane_field "$l" providers)"; case " $v " in *" $p "*) printf '%s' "$l"; return 0 ;; esac
-  done
-  return 1
-}
-
-# _lane_by_native <token> -> canonical lane via the native_of field (session-observe
-# context: codex->cx, claude->cc, gemini->gm — the provider's NATIVE family lane,
-# not its transport default).
-_lane_by_native() {
-  local t="${1:-}" l v
-  [ -n "$t" ] || return 1
-  for l in $OSRC_LANE_REGISTRY; do
-    v="$(_lane_field "$l" native_of)"; case " $v " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
-  done
-  return 1
-}
-
-# _lane_by_field <field> <token> -> canonical lane whose space-joined field contains
-# the token. Generic membership lookup for fields not worth their own resolver.
+# _lane_by_field <field> <token> -> lane whose space-joined field holds the token (providers; native_of: codex->cx).
 _lane_by_field() {
-  local f="${1:-}" t="${2:-}" l v
+  local f="${1:-}" t="${2:-}" l
   [ -n "$f" ] && [ -n "$t" ] || return 1
   for l in $OSRC_LANE_REGISTRY; do
-    v="$(_lane_field "$l" "$f")"; case " $v " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
+    _lane_fv "$l" "$f"; case " $_OSRC_LV " in *" $t "*) printf '%s' "$l"; return 0 ;; esac
   done
   return 1
 }
+_lane_by_provider() { [ -n "${1:-}" ] && _lane_by_field providers "$1"; }   # <--provider value> -> canonical lane
+_lane_by_native() { [ -n "${1:-}" ] && _lane_by_field native_of "$1"; }
 
 # _lane_flag <token> <field> -> rc0 when the token's lane declares field=yes.
 _lane_flag() {
   local l; l="$(_lane_by_token "${1:-}" 2>/dev/null)" || return 1
-  [ "$(_lane_field "$l" "$2" 2>/dev/null)" = "yes" ]
+  _lane_fv "$l" "$2" && [ "$_OSRC_LV" = "yes" ]
 }
 
-# _lane_default -> the catch-all implicit-provider lane (dv). Reads default_lane
-# from the registry; the literal is the hard floor while dv is unported.
+# _lane_default -> the catch-all implicit-provider lane (default_lane=yes; dv is the floor).
 _lane_default() {
   local l
   for l in $OSRC_LANE_REGISTRY; do
-    [ "$(_lane_field "$l" default_lane 2>/dev/null)" = "yes" ] && { printf '%s' "$l"; return 0; }
+    _lane_fv "$l" default_lane && [ "$_OSRC_LV" = "yes" ] && { printf '%s' "$l"; return 0; }
   done
   printf 'dv'
 }
+
 
 # _lane_disp <lane> [provider] -> the dispatch vehicle: disp_by_provider pairs first
 # (or serves ccor under cc, codexor under codex), then the lane's disp field.
@@ -3949,6 +3947,7 @@ lane_descriptor_or() {
     "conserve_why=funded cash lane, preserves subscription quotas" \
     "participates_health=yes"
 }
+_lane_table   # the registry, read once per process: every lookup after this is fork-free
 
 # Explicit-dispatch arm for the or lane (provider split + Devin dual-lane reroute +
 # auto-route-to-cc). Dynamic scope: reads/writes PROVIDER/MODEL/RESOLVED_ID/disp/ORIG

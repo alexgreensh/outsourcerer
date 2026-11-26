@@ -71,6 +71,7 @@ _ALL_SUITES="$_ALL_SUITES test_supervise"
 _ALL_SUITES="$_ALL_SUITES test_watchsvc"   # per-user watcher service: observe/wake/limit/install
 _ALL_SUITES="$_ALL_SUITES test_supervise_lifecycle test_supervise_dedupe test_preflight_map"
 _ALL_SUITES="$_ALL_SUITES test_stall test_mc_alive"   # stalled lanes + autonudge; Mission Control liveness
+_ALL_SUITES="$_ALL_SUITES test_fx_mc2"   # 0.18.0 release gate: one watched rule, card fields, hub liveness, locks, speed
 _ALL_SUITES="$_ALL_SUITES test_parity_autoheal"
 _ALL_SUITES="$_ALL_SUITES test_pr10_falsestall_before_quota"
 _ALL_SUITES="$_ALL_SUITES test_cline_lane"

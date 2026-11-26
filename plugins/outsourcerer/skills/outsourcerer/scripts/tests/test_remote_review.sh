@@ -7,6 +7,7 @@
 # GitHub's API. Time is a fake clock (OSRC_NOW, OSRC_TIME_UNIT=1) so "20 minutes" costs no sleeping.
 # Every OSRC_HOME is under the runner's scratch directory; live state is never used.
 set -uo pipefail
+export OSRC_CARD_GUARD=0   # waiter logic only: a card-less owner is otherwise asked for its Mission Control card (lib/card_fresh.sh)
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../outsourcerer.sh"; FIX="$HERE/fixtures/review"
 TMP="$(mktemp -d "${TMPDIR%/}/.test-remote-review.XXXXXX")" || { echo "FAIL: cannot create scratch directory" >&2; exit 1; }; trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0

@@ -15,6 +15,7 @@
 #   reader; a repointed fallback loop re-runs itself; other tmux servers are skipped whatever the channel.
 # Run: bash test_watchsvc.sh
 set -uo pipefail
+export OSRC_CARD_GUARD=0   # waiter logic only: a card-less owner is otherwise asked for its Mission Control card (lib/card_fresh.sh)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"; SRC="$SCRIPT_DIR/../outsourcerer.sh"
 command -v jq >/dev/null || { echo "FAIL: jq required"; exit 1; }
 TMP="$(mktemp -d "${TMPDIR%/}/.test-watchsvc.XXXXXX")" || exit 1; PIDS=""
@@ -211,7 +212,7 @@ out="$(PATH="$TMP/bin:$PATH" OSRC_WATCH_NOTIFY=1 guard)"; out="$(PATH="$TMP/bin:
 [ -z "$out" ] && [ ! -d "$OSRC_HOME/watchsvc/run.lock" ] && ! grep -rq 'watcher run' "$OSRC_HOME/watchsvc/service.log" 2>/dev/null \
   && grep -q 'ask the user to run' "$OSRC_HOME/owners/sess5/.unguarded" && ok "the yield starts no daemon; it names the install command for the user" || no "guard started a watcher [$out]"
 [ "$(grep -c . "$TMP/notes" 2>/dev/null)" = 1 ] && ok "one notification per yield, not one per turn end" || no "notifications: $(grep -c . "$TMP/notes" 2>/dev/null)"
-grep -q 'ask the user to run' <<<"$(rm -f "$OSRC_HOME/owners/sess5/.stop-blocks"; guard)" && ok "the block reason asks the user to install, the agent does not" || no "block reason invites an install"
+grep -q 'ask the user to run' <<<"$(rm -f "$OSRC_HOME/owners/sess5/.stop-blocks"; rm -rf "$OSRC_HOME/watcher-hint"; guard)" && ok "the block reason (once per session) asks the user to install, the agent does not" || no "block reason invites an install"
 printf '{"session_id":"sess5"}' | OSRC_HOME="$TMP/broken-home-$$" "$SRC" stop-guard >/dev/null 2>&1; rc=$?
 [ "$rc" = 0 ] && ok "guard on a missing home exits 0 (never traps the user)" || no "guard rc $rc"
 
@@ -228,10 +229,10 @@ kill "$st" 2>/dev/null
 echo 1 > "$OSRC_HOME/watchsvc/run.lock/pid"; i=0; while kill -0 "$d" 2>/dev/null && [ "$i" -lt 25 ]; do sleep 0.2; i=$((i+1)); done
 ! kill -0 "$d" 2>/dev/null && ok "a loop whose lock was taken over exits (no pile-up)" || no "loop kept running without its lock"
 fresh 6b; mkdir -p "$OSRC_HOME/watchsvc"; printf '# script: %s\n' "$SRC" > "$OSRC_HOME/watchsvc/launch"; echo fallback > "$OSRC_HOME/watchsvc/installed"
-ln -s "$SCRIPT_DIR/.." "$TMP/plugin-v2"
+mkdir -p "$HOME/.claude/plugins/cache"; ln -s "$SCRIPT_DIR/.." "$HOME/.claude/plugins/cache/plugin-v2"   # an installed plugin copy (a dev copy never repoints: test_fx_mc2)
 OSRC_WATCH_INTERVAL=1 "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1.5
 kill -0 "$d" 2>/dev/null || no "setup: loop did not start under its own launcher"
-S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; until { grep -q 'plugin-v2/outsourcerer.sh watcher run' <<<"$(ps -o command= -p "$d" 2>/dev/null)" && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)" = "$d" ]; } || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
+S "SCRIPT_PATH='$HOME/.claude/plugins/cache/plugin-v2/outsourcerer.sh'; _ws_launcher"; i=0; until { grep -q 'plugin-v2/outsourcerer.sh watcher run' <<<"$(ps -o command= -p "$d" 2>/dev/null)" && [ "$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)" = "$d" ]; } || [ "$i" -ge 25 ]; do sleep 0.2; i=$((i+1)); done
 p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"
 [ "$p" = "$d" ] && grep -q 'plugin-v2/outsourcerer.sh watcher run' <<<"$(ps -o command= -p "$d" 2>/dev/null)" && ok "a fallback loop whose launcher now names another plugin copy re-runs itself there (nobody has to restart it)" || no "repointed loop not running on the new copy [pid $p: $(ps -o command= -p "$d" 2>/dev/null)]"
 S '_ws_stop_loop'
@@ -324,17 +325,18 @@ S "SCRIPT_PATH='$TMP/bin/fake-osrc'; _ws_limits"; grep -q '^K ' "$TMP/sent4" && 
 echo "=== install / uninstall: explicit, idempotent, reversible ==="
 fresh 7; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd.log\n' "$TMP" > "$TMP/bin/systemctl"; chmod +x "$TMP/bin/systemctl"
 inst() { PATH="$TMP/bin:$PATH" OSRC_WATCH_SYSTEMD_DIR="$TMP/units" OSRC_WATCH_BACKEND=systemd OSRC_WATCH_INTERVAL=7 "$SRC" watcher "$@" 2>&1; }
-inst install >/dev/null; c1="$(cat "$TMP/units/outsourcerer-watcher.service" 2>/dev/null)"; inst install >/dev/null
-[ -n "$c1" ] && [ "$c1" = "$(cat "$TMP/units/outsourcerer-watcher.service")" ] && [ "$(ls "$TMP/units" | wc -l | tr -d ' ')" = 1 ] && ok "install twice: one identical unit" || no "unit not idempotent"
+UNIT="$(S _ws_svc)"   # per-OSRC_HOME unit name: a sandbox never touches the account's own watcher
+inst install >/dev/null; c1="$(cat "$TMP/units/$UNIT" 2>/dev/null)"; inst install >/dev/null
+[ -n "$c1" ] && [ "$c1" = "$(cat "$TMP/units/$UNIT")" ] && [ "$(ls "$TMP/units" | wc -l | tr -d ' ')" = 1 ] && ok "install twice: one identical unit" || no "unit not idempotent"
 grep -q 'Restart=always' <<<"$c1" && grep -q "OSRC_HOME=$OSRC_HOME" <<<"$c1" && grep -q 'enable outsourcerer-watcher' "$TMP/sysd.log" && ok "systemd unit restarts and is enabled" || no "unit: $c1"
 grep -q "OSRC_WATCH_INTERVAL=7" "$OSRC_HOME/watchsvc/env" && grep -q '^export PATH=' "$OSRC_HOME/watchsvc/env" && ok "install captures PATH and the watcher knobs for the service" || no "env not captured"
 grep -q "^ExecStart=\"$BASH\" \"$OSRC_HOME/watchsvc/launch\"\$" <<<"$c1" && ! grep -qF "$SRC" <<<"$c1" && grep -qxF "# script: $SRC" "$OSRC_HOME/watchsvc/launch" \
   && ok "the unit runs a launcher under \$BASH, never the versioned plugin path" || no "unit: $c1 / launch: $(cat "$OSRC_HOME/watchsvc/launch" 2>/dev/null)"
-S "SCRIPT_PATH='$TMP/plugin-v2/outsourcerer.sh'; _ws_refresh"
+S "SCRIPT_PATH='$HOME/.claude/plugins/cache/plugin-v2/outsourcerer.sh'; _ws_refresh"
 grep -q "plugin-v2/outsourcerer.sh' watcher run\|plugin-v2/outsourcerer.sh watcher run" "$OSRC_HOME/watchsvc/launch" && [ ! -d "$OSRC_HOME/watchsvc/run.lock" ] \
   && ok "a call from a new plugin copy repoints the launcher (and starts nothing under systemd)" || no "launcher not refreshed: $(cat "$OSRC_HOME/watchsvc/launch")"
 inst uninstall >/dev/null
-[ ! -e "$TMP/units/outsourcerer-watcher.service" ] && [ ! -d "$OSRC_HOME/watchsvc" ] && grep -q 'disable --now' "$TMP/sysd.log" && ok "uninstall removes the unit and all watcher state in one command" || no "uninstall incomplete"
+[ ! -e "$TMP/units/$UNIT" ] && [ ! -d "$OSRC_HOME/watchsvc" ] && grep -q 'disable --now' "$TMP/sysd.log" && ok "uninstall removes the unit and all watcher state in one command" || no "uninstall incomplete"
 fresh 8; OSRC_WATCH_BACKEND=fallback OSRC_WATCH_INTERVAL=1 "$SRC" watcher install >/dev/null 2>&1; sleep 1.5
 p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"; [ -n "$p" ] && PIDS="$PIDS $p"
 [ "$(cat "$OSRC_HOME/watchsvc/installed" 2>/dev/null)" = fallback ] && [ -n "$p" ] && kill -0 "$p" && ok "fallback backend: a detached loop runs" || no "fallback not running"
@@ -342,15 +344,15 @@ p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"; [ -n "$p" ] && PIDS="
 "$SRC" watcher uninstall >/dev/null 2>&1; sleep 0.5
 ! kill -0 "$p" 2>/dev/null && [ ! -d "$OSRC_HOME/watchsvc" ] && ok "uninstall stops the fallback loop" || no "fallback loop survived uninstall"
 "$SRC" watcher status >/dev/null 2>&1; [ "$?" = 3 ] && ok "status rc 3 when nothing watches" || no "status rc when down"
-fresh 9; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd9.log\ncase "$*" in *restart*) exit 1 ;; esac\n' "$TMP" > "$TMP/bin/systemctl"
+fresh 9; UNIT="$(S _ws_svc)"; printf '#!/bin/sh\necho "systemctl $*" >> %s/sysd9.log\ncase "$*" in *restart*) exit 1 ;; esac\n' "$TMP" > "$TMP/bin/systemctl"
 OSRC_WATCH_INTERVAL=1 "$SRC" watcher run >/dev/null 2>&1 & d=$!; PIDS="$PIDS $d"; sleep 1
 out="$(OSRC_WATCH_INTERVAL=1 inst install)"; sleep 1.5; p="$(cat "$OSRC_HOME/watchsvc/run.lock/pid" 2>/dev/null)"; [ -n "$p" ] && PIDS="$PIDS $p"
 ! kill -0 "$d" 2>/dev/null && ok "install stops a loop that was already running" || no "old loop survived install"
-[ ! -e "$TMP/units/outsourcerer-watcher.service" ] && grep -q 'disable --now' "$TMP/sysd9.log" && [ "$(cat "$OSRC_HOME/watchsvc/installed")" = fallback ] && [ -n "$p" ] && kill -0 "$p" \
+[ ! -e "$TMP/units/$UNIT" ] && grep -q 'disable --now' "$TMP/sysd9.log" && [ "$(cat "$OSRC_HOME/watchsvc/installed")" = fallback ] && [ -n "$p" ] && kill -0 "$p" \
   && ok "a failed systemd start removes the unit and falls back to the loop" || no "failed install left: $(ls "$TMP/units" 2>/dev/null) installed=$(cat "$OSRC_HOME/watchsvc/installed" 2>/dev/null) [$out]"
 "$SRC" watcher uninstall >/dev/null 2>&1; sleep 0.5; ! kill -0 "$p" 2>/dev/null && ok "and one uninstall removes it" || no "fallback after failed install survived"
-fresh 10; mkdir -p "$TMP/units"; echo stale > "$TMP/units/outsourcerer-watcher.service"
-inst uninstall >/dev/null; [ ! -e "$TMP/units/outsourcerer-watcher.service" ] && ok "uninstall removes a unit even with no install record" || no "orphan unit kept"
+fresh 10; UNIT="$(S _ws_svc)"; mkdir -p "$TMP/units"; echo stale > "$TMP/units/$UNIT"
+inst uninstall >/dev/null; [ ! -e "$TMP/units/$UNIT" ] && ok "uninstall removes a unit even with no install record" || no "orphan unit kept"
 
 echo "=== tmux wake, end to end (fake pane) ==="
 fresh 11; U=11111111-2222-4333-8444-555555555555; mkdir -p "$TMP/proj" "$TMP/pane" "$OSRC_CLAUDE_SESSIONS_DIR" "$OSRC_HOME/watchsvc/$U"; own "$U" .keep

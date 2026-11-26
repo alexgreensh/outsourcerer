@@ -196,30 +196,44 @@ osrc_not_landed_emit() { # <pane> <who>
 }
 
 # ---- watcher liveness -------------------------------------------------------------------------------
-# supervise stamps supervise/<key>/alive every poll. A session that owns live lanes with no supervise
-# armed for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
+# ONE answer to "is this session watched", for the stop guard, Mission Control and the per-command
+# warning: a live, polling supervise covering everything (`*`), or the standing watcher (lib/watchsvc.sh)
+# while it ticks and can wake the session. A supervise naming explicit ids covers only those ids.
+osrc_session_watched() { # <sid>
+  local c n=$'\n'; c="$(_sv_armed_cover "$1" 2>/dev/null)"   # captured, not piped: a quiet grep must not SIGPIPE it
+  case "$n$c$n" in *"$n*$n"*) return 0 ;; esac
+  type _ws_covers >/dev/null 2>&1 && _ws_covers "$1"
+}
+# supervise stamps supervise/<key>/alive every poll. A session that owns live lanes nobody watches
+# (osrc_session_watched) for more than OSRC_WATCHER_GRACE seconds (default 120) is unwatched.
 osrc_watcher_alive() { printf '%s\n' "${2:-$(_sv_now)}" > "$1/alive" 2>/dev/null; return 0; }
 osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 when watched or nothing live
-  local sid="$1" now="${2:-$(_sv_now)}" d f pid last=0 start=0 m live=0 t
+  local sid="$1" now="${2:-$(_sv_now)}" d f last=0 start=0 m live=0 t cover nl=$'\n'
   case "$sid" in ''|.*|*/*) return 1 ;; esac
   d="$OSRC_HOME/owners/$sid"; [ -d "$d" ] || return 1
-  for f in "$OSRC_HOME/supervise/$sid"/armed.*; do
-    [ -f "$f" ] || continue; pid="${f##*.}"
-    kill -0 "$pid" 2>/dev/null && return 1
-  done
+  osrc_session_watched "$sid" && return 1
   last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$sid/alive" 2>/dev/null)" 0)"
+  local -a ms=()
   for f in "$d"/*; do
     [ -f "$f" ] || continue
     case "${f##*/}" in .*|watch.*) continue ;; esac
-    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; m="$(_sv_num "$m" 0)"
+    ms+=("$f")
+  done
+  [ "${#ms[@]}" -gt 0 ] || return 1
+  # ONE stat for every marker (one per marker was ~50 forks per hub export on a state home with old
+  # markers). GNU first: GNU `stat -f` is filesystem status.
+  for m in $(stat -c %Y "${ms[@]}" 2>/dev/null || stat -f %m "${ms[@]}" 2>/dev/null); do
+    case "$m" in ''|*[!0-9]*) continue ;; esac
     { [ "$start" = 0 ] || [ "$m" -lt "$start" ]; } && start="$m"
   done
   [ "$start" -gt 0 ] || return 1
   [ "$last" -gt "$start" ] && start="$last"
   [ $(( now - start )) -gt "$(_sv_num "${OSRC_WATCHER_GRACE:-}" 120)" ] || return 1
+  cover="$(_sv_armed_cover "$sid" 2>/dev/null)"
   for f in "$d"/*; do
     [ -f "$f" ] || continue; t="${f##*/}"
     case "$t" in .*|watch.*) continue ;; esac
+    case "$nl$cover$nl" in *"$nl$t$nl"*) continue ;; esac   # an explicit supervise covers this one
     case "$(_owned_live_state "$t" 2>/dev/null)" in live|waiting) live=$((live + 1)) ;; esac
   done
   [ "$live" -gt 0 ] || return 1

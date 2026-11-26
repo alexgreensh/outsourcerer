@@ -407,20 +407,34 @@ _osrc_lane_check_collect() { # <id> <json> <now>   (called under the lane lock)
 
 # ---- state + events ----------------------------------------------------------------------------
 osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no network, safe in hooks)
-  local id="$1" f head v ch_state
-  f="$(_osrc_lane_json "$id")"; [ -f "$f" ] || { printf gone; return 0; }
-  if [ "$(jq -r '.branch_deleted' "$f")" = true ]; then printf failed; return 0; fi
-  head="$(jq -r '.head // ""' "$f")"
-  ch_state=""; [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && ch_state="$(jq -r '.check.state // ""' "$f")"
-  if [ "$ch_state" = done ] && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ]; then printf failed; return 0; fi
-  [ -z "$head" ] || [ "$(jq -r '.proof_back // ""' "$f")" != "$head" ] || { printf live; return 0; }   # sent back for proof
-  if [ "$(jq -r '.head_ready' "$f")" = true ]; then
+  local f; f="$(_osrc_lane_json "$1")"; [ -f "$f" ] || { printf gone; return 0; }
+  _osrc_remote_rec "$f" && _osrc_remote_state_rec "$1"
+}
+# The lane file in ONE jq (it was ~14 per lane per pass, also when the poll was throttled): sets _RR_*.
+# \037 separates; tabs and newlines inside values become spaces.
+_osrc_remote_rec() { # <json>
+  IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
+    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref < <(jq -r 'def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");
+    [(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
+     (.check.rc // 0), (.proof_back // ""), (.head_ready // false), (.ready_head // ""), (.poll_branch // .branch // ""),
+     (.head_msg // ""), (.seen_branch // false), (.created_ts // 0), (.last_poll_ts // 0), (.last_push_ts // .created_ts // 0),
+     (.session_ref // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
+  _RR_errn="${_RR_errn:-0}"; _RR_crc="${_RR_crc:-0}"
+  case "$_RR_created" in ''|*[!0-9]*) _RR_created=0 ;; esac; case "$_RR_lastpush" in ''|*[!0-9]*) _RR_lastpush="$_RR_created" ;; esac
+}
+_osrc_remote_state_rec() { # <id>: osrc_remote_state from the _RR_* record
+  local id="$1" v ch_state=""
+  [ "$_RR_del" = true ] && { printf failed; return 0; }
+  [ "$_RR_chead" = "$_RR_head" ] && ch_state="$_RR_cstate"
+  if [ "$ch_state" = done ] && [ "$_RR_crc" != 0 ]; then printf failed; return 0; fi
+  [ -z "$_RR_head" ] || [ "$_RR_proofb" != "$_RR_head" ] || { printf live; return 0; }   # sent back for proof
+  if [ "$_RR_hready" = true ]; then
     [ "$ch_state" != running ] || { printf live; return 0; }     # done-when check still running
-    v=""; type _osrc_review_verdict_for >/dev/null 2>&1 && v="$(_osrc_review_verdict_for "$id" "$head")"
+    v=""; type _osrc_review_verdict_for >/dev/null 2>&1 && v="$(_osrc_review_verdict_for "$id" "$_RR_head")"
     # CHANGES: the ball is back with the lane, so it is live (and gets a stall clock from the verdict)
     case "$v" in MERGE|BLOCK) printf done; return 0 ;; CHANGES) printf live; return 0 ;; esac
     # An item closed as merged means this head already landed: the lane is done, not ready.
-    type _osrc_review_item_closed_merged >/dev/null 2>&1 && _osrc_review_item_closed_merged "$id" "$head" && { printf done; return 0; }
+    type _osrc_review_item_closed_merged >/dev/null 2>&1 && _osrc_review_item_closed_merged "$id" "$_RR_head" && { printf done; return 0; }
     printf ready; return 0
   fi
   printf live
@@ -437,32 +451,36 @@ osrc_remote_events() {
   renotify="$(_osrc_mins "${OSRC_RENOTIFY_MIN:-15}")"
   for id in $(_osrc_remote_ids); do
     f="$(_osrc_lane_json "$id")"
-    _osrc_lane_poll "$id" || true
-    head="$(jq -r '.head // ""' "$f")"; sha7="${head:0:7}"
+    _osrc_remote_rec "$f" || continue
+    # Throttled and no check result to collect: the poll would only take and drop its lock.
+    case "$_RR_lastpoll" in ''|*[!0-9]*) _RR_lastpoll=0 ;; esac
+    if [ $(( now - _RR_lastpoll )) -lt "${OSRC_REMOTE_POLL_SECS:-60}" ] && [ "$_RR_cstate" != running ]; then :
+    else _osrc_lane_poll "$id" || true; _osrc_remote_rec "$f" || continue; fi
+    head="$_RR_head"; sha7="${head:0:7}"
     # poll trouble: auth / rate limit at once, anything else after N consecutive failures
-    errn="$(jq -r '.err_count // 0' "$f")"; errk="$(jq -r '.err_kind // ""' "$f")"
-    if [ "$errn" -gt 0 ] && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
+    errn="$_RR_errn"; errk="$_RR_errk"
+    if [ "$errn" -gt 0 ] 2>/dev/null && { [ "$errk" = auth ] || [ "$errk" = rate ] || [ "$errn" -ge "${OSRC_REMOTE_ERR_MAX:-5}" ]; }; then
       if _osrc_ev_due "$id" "pollerr:$errk" "$renotify"; then
         case "$errk" in
-          auth) _osrc_emit failed "$id" "gh/git auth failure polling $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .err_msg "$f")" "gh auth status" ;;
-          rate) _osrc_emit failed "$id" "rate limited polling $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
+          auth) _osrc_emit failed "$id" "gh/git auth failure polling $_RR_pbranch: $(jq -r .err_msg "$f")" "gh auth status" ;;
+          rate) _osrc_emit failed "$id" "rate limited polling $_RR_pbranch: $(jq -r .err_msg "$f")" "gh api rate_limit --jq .rate" ;;
           *) _osrc_emit failed "$id" "polling failed ${errn}x ($errk): $(jq -r .err_msg "$f")" "$(_osrc_self) lane poll $id" ;;
         esac
       fi
     fi
-    if [ "$(jq -r '.branch_deleted' "$f")" = true ] && _osrc_ev_due "$id" deleted "$renotify"; then
-      _osrc_emit failed "$id" "branch $(jq -r '.poll_branch // .branch' "$f") was deleted from the remote" "$(_osrc_self) lane show $id"
+    if [ "$_RR_del" = true ] && _osrc_ev_due "$id" deleted "$renotify"; then
+      _osrc_emit failed "$id" "branch $_RR_pbranch was deleted from the remote" "$(_osrc_self) lane show $id"
     fi
-    if [ -n "$head" ] && [ "$(jq -r '.check.head // ""' "$f")" = "$head" ] && [ "$(jq -r '.check.state // ""' "$f")" = done ] \
-       && [ "$(jq -r '.check.rc // 0' "$f")" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
-      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$(jq -r .check.rc "$f")$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")$(type osrc_proof_remote_note >/dev/null 2>&1 && osrc_proof_remote_note "$id")" "$(nx=""; ! type osrc_proof_remote_next >/dev/null 2>&1 || nx="$(osrc_proof_remote_next "$id")"; [ -n "$nx" ] && printf '%s' "$nx" || printf 'tail -40 %q' "$(jq -r '.check.log' "$f")")"
+    if [ -n "$head" ] && [ "$_RR_chead" = "$head" ] && [ "$_RR_cstate" = done ] \
+       && [ "$_RR_crc" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
+      _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$_RR_crc$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")$(type osrc_proof_remote_note >/dev/null 2>&1 && osrc_proof_remote_note "$id")" "$(nx=""; ! type osrc_proof_remote_next >/dev/null 2>&1 || nx="$(osrc_proof_remote_next "$id")"; [ -n "$nx" ] && printf '%s' "$nx" || printf 'tail -40 %q' "$(jq -r '.check.log' "$f")")"
     fi
-    if [ -n "$head" ] && [ "$(jq -r '.proof_back // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "proofback:$head" "$renotify"; then
+    if [ -n "$head" ] && [ "$_RR_proofb" = "$head" ] && _osrc_ev_due "$id" "proofback:$head" "$renotify"; then
       _osrc_emit failed "$id" "READY $sha7 not reviewed: $(osrc_proof_gate "$id" "$head")$(osrc_proof_remote_note "$id")" "$(osrc_proof_remote_next "$id")"
     fi
-    st="$(osrc_remote_state "$id")"
-    if [ "$st" = ready ] && [ "$(jq -r '.ready_head // ""' "$f")" = "$head" ] && _osrc_ev_due "$id" "ready:$head" 0; then
-      _osrc_emit done "$id" "READY $sha7 on $(jq -r '.poll_branch // .branch' "$f"): $(jq -r .head_msg "$f") (queued for review)" "$(_osrc_next_for_ready)"
+    st="$(_osrc_remote_state_rec "$id")"
+    if [ "$st" = ready ] && [ "$_RR_readyh" = "$head" ] && _osrc_ev_due "$id" "ready:$head" 0; then
+      _osrc_emit done "$id" "READY $sha7 on $_RR_pbranch: $_RR_msg (queued for review)" "$(_osrc_next_for_ready)"
     fi
     # backstop: READY with no live review item for this head (removed and re-added lane, dropped or
     # lost item) is the "sat READY for hours" class. Say so instead of staying quiet.
@@ -474,16 +492,23 @@ osrc_remote_events() {
            fi ;;
       esac
     fi
-    # a lane that never pushes: report once, as "never started", with whatever the vehicle said
-    if [ "$st" = live ] && [ -z "$head" ] && [ "$errn" = 0 ] && [ "$(jq -r '.seen_branch' "$f")" != true ] && _osrc_lane_never_started "$f" "$now" \
+    # A lane that has not pushed: "never started" (failed) only when the launch reported no session.
+    # Cloud lanes often push only when done, so a lane whose vehicle reported a live session is quiet,
+    # not failed: one `stalled` row naming the session, never an invitation to kill working lanes.
+    if [ "$st" = live ] && [ -z "$head" ] && [ "$errn" = 0 ] && [ "$_RR_seen" != true ] && _osrc_lane_never_started "$_RR_created" "$now" \
        && _osrc_ev_due "$id" neverstarted 0; then
-      _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - $(jq -r '.created_ts' "$f")) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
+      if [ -n "$_RR_ref" ]; then
+        _osrc_emit stalled "$id" "no push yet after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m (session ${_RR_ref#url:} is live; cloud lanes often push only when done)" "$(_osrc_self) lane show $id"
+      else
+        _osrc_emit failed "$id" "never started: no push to $(jq -r .branch "$f") after $(( (now - _RR_created) / ${OSRC_TIME_UNIT:-60} ))m$(_osrc_lane_vehicle_note "$id" "$f")" "$(_osrc_self) lane show $id"
+      fi
     fi
     if [ "$st" = live ] && [ -n "$stall" ] && [ "$stall" -gt 0 ] \
        && { [ -n "$head" ] || [ "$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")" -le 0 ]; }; then
-      last_move="$(_osrc_lane_last_move "$id" "$f")"
+      last_move="$_RR_lastpush"; vts="$(type _osrc_review_last_verdict_ts >/dev/null 2>&1 && _osrc_review_last_verdict_ts "$id" || echo 0)"
+      [ "$vts" -gt "$last_move" ] 2>/dev/null && last_move="$vts"
       if [ $(( now - last_move )) -ge "$stall" ] && _osrc_ev_due "$id" stalled "$stall"; then
-        _osrc_emit stalled "$id" "no push on $(jq -r '.poll_branch // .branch' "$f") for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $(jq -r '.head_msg // ""' "$f"))" "$(_osrc_self) lane show $id" "$last_move"
+        _osrc_emit stalled "$id" "no push on $_RR_pbranch for $(( (now - last_move) / ${OSRC_TIME_UNIT:-60} ))m (head ${sha7:-none}, last: $_RR_msg)" "$(_osrc_self) lane show $id" "$last_move"
       fi
     fi
   done
@@ -503,9 +528,10 @@ _osrc_lane_last_move() { # <id> <json>
 }
 
 # A lane that has not pushed within OSRC_REMOTE_NEVER_START minutes (default 45) never started.
-_osrc_lane_never_started() { # <json> <now>
-  local t; t="$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")"
-  [ "$t" -gt 0 ] && [ $(( $2 - $(jq -r '.created_ts' "$1") )) -ge "$t" ]
+_osrc_lane_never_started() { # <created-epoch|json> <now>
+  local t c="$1"; t="$(_osrc_mins "${OSRC_REMOTE_NEVER_START:-45}")"
+  case "$c" in ''|*[!0-9]*) c="$(jq -r '.created_ts' "$1")" ;; esac
+  [ "$t" -gt 0 ] && [ $(( $2 - c )) -ge "$t" ]
 }
 
 # ", vehicle <v>: <last line it printed>" when the launch recorded a vehicle; empty otherwise.

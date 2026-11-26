@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "s=\"${CLAUDE_PLUGIN_ROOT}/skills/outsourcerer/scripts/outsourcerer.sh\"; [ -x \"$s\" ] || exit 0; \"$s\" stop-guard || exit 0",
+            "command": "s=\"${CLAUDE_PLUGIN_ROOT}/skills/outsourcerer/scripts/outsourcerer.sh\"; [ -x \"$s\" ] || exit 0; p=\"${s%/*}/lib/stopguard_pre.sh\"; if [ -r \"$p\" ]; then bash \"$p\" \"$s\" || exit 0; else \"$s\" stop-guard || exit 0; fi",
             "timeout": 15
           }
         ]

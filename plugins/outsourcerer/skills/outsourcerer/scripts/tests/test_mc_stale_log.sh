@@ -36,7 +36,7 @@ live() { ( OSRC_SOURCED=1; . "$SRC" >/dev/null 2>&1
   _osrc_mc_url_live "$1" && echo live || echo stale ) }
 kill "$pid" 2>/dev/null; sleep 0.3; rm -f "$OSRC_HOME/hub/serve.json"
 v="$(live "$stale")"; [ "$v" = stale ] && ok "a log URL with no serve.json is not accepted" || bad "no-record URL judged '$v'"
-sleep 300 & lp=$!; echo "$lp" >> "$T/pids"
+bash -c "sleep 300; : hub_server.py --osrc-home $OSRC_HOME" & lp=$!; echo "$lp" >> "$T/pids"; sleep 0.2   # argv names our hub (a recycled pid does not count)
 printf '{"pid":%s,"port":9}\n' "$lp" > "$OSRC_HOME/hub/serve.json"
 v="$(live "$stale")"; [ "$v" = live ] && ok "a URL whose port and live pid match serve.json is accepted" || bad "matching record judged '$v'"
 v="$(live "http://127.0.0.1:10/?t=x")"; [ "$v" = stale ] && ok "a URL on another port than serve.json is not accepted" || bad "port mismatch judged '$v'"

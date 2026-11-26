@@ -317,6 +317,9 @@ _osrc_hub_scr_get() { # <id> -> prints cached "state\nevidence"; rc1 = caller mu
       tail -n +2 "$pf" 2>/dev/null; return 0
     fi
   fi
+  # Past OSRC_HUB_SCR_MAX seconds (default 600) a cached screen is never served: a refresh that keeps
+  # failing (or a lock left by a killed worker) must not freeze a lane's state on Mission Control.
+  [ $(( now - ep )) -le "$(_sv_num "${OSRC_HUB_SCR_MAX:-}" 600)" ] || return 1
   # Stale by age, activity, or a moved input: serve it anyway (stale-while-revalidate). The fresh
   # read is queued for ONE deferred worker (_osrc_hub_scr_flush_wanted, run at export end) rather
   # than forked here: live pane reads hammering the tmux server mid-export stall the export's own
@@ -350,6 +353,9 @@ _osrc_hub_scr_flush_wanted() {
       [ -n "$id" ] || continue
       _osrc_hub_slug_ok "$id" || continue
       pf="$OSRC_HOME/hub/cache/scr/$id"
+      # A lock older than any bounded screen read (OSRC_HUB_SCR_LOCK_MAX, 120 s) is a killed worker's: break
+      # it. Two workers racing the break can both read this one screen, which is harmless (atomic write).
+      [ -d "$pf.lock" ] && [ $(( $(date +%s) - $(_osrc_hub_mt "$pf.lock") )) -gt "$(_sv_num "${OSRC_HUB_SCR_LOCK_MAX:-}" 120)" ] && rmdir "$pf.lock" 2>/dev/null
       mkdir "$pf.lock" 2>/dev/null || continue
       out="$(_osrc_hub_raw_sv_target_screen "$id" 2>/dev/null)" || out=""
       if [ -n "$out" ]; then

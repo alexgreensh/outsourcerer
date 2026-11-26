@@ -45,8 +45,10 @@ CONSOLE_USER=someone hl true; [ "$?" = 0 ] && ok "someone else at the console: h
 ( PATH="$TMP/fake-mac:$PATH"; SSH_CONNECTION="1 2 3 4" lib _osrc_mc_headless ); [ "$?" = 0 ] && ok "over SSH: headless" || no "ssh read as desktop"
 
 echo "=== work starting opens Mission Control once per hub process ==="
-# A live "hub": this test's own shell stands in for its pid; serve.json is what hub_server.py writes.
-sleep 300 & HUBPID=$!
+# A live "hub": a process whose argv names hub_server.py for this OSRC_HOME (the identity every opener
+# checks); serve.json is what hub_server.py writes.
+fakehub() { bash -c "sleep 300; : hub_server.py --osrc-home $OSRC_HOME" & HUBPID=$!; sleep 0.2; }
+fakehub
 printf '{"pid":%s,"port":8799,"started":1}\n' "$HUBPID" > "$OSRC_HOME/hub/serve.json"
 printf '0123456789abcdef0123456789abcdef\n' > "$OSRC_HOME/hub/token"
 desk() { OSRC_HUB_NO_OPEN=0 OSRC_MC_OPEN_CMD="$TMP/bin/open-rec" OSRC_MC_ASSUME_DESKTOP=1 "$@"; }
@@ -58,7 +60,7 @@ desk lib osrc_mc_cmd_hook run "a task" 2>/dev/null; desk lib osrc_mc_cmd_hook fl
 desk lib osrc_mc_cmd_hook session read 2>/dev/null
 [ "$(opens)" = 1 ] && ok "session read is not work starting: no open" || no "session read opened"
 kill "$HUBPID" 2>/dev/null; wait "$HUBPID" 2>/dev/null
-sleep 300 & HUBPID=$!; printf '{"pid":%s,"port":8799,"started":2}\n' "$HUBPID" > "$OSRC_HOME/hub/serve.json"
+fakehub; printf '{"pid":%s,"port":8799,"started":2}\n' "$HUBPID" > "$OSRC_HOME/hub/serve.json"
 date +%s > "$OSRC_HOME/hub/tab.seen"
 desk lib osrc_mc_cmd_hook session start 2>/dev/null
 [ "$(opens)" = 1 ] && ok "a new hub process, but a tab fetched data within 2 min: no open" || no "opened with a fresh tab"
