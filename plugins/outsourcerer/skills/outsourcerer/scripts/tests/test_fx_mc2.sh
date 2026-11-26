@@ -58,7 +58,7 @@ l="$(lib _osrc_hub_lane_remote r1)"
 jq -e '.lane == "Claude cloud" and .branch == "cloud/r1"' <<<"$l" >/dev/null && ok "a derived cloud lane carries its lane" || no "remote lane: $l"
 mkdir -p "$OSRC_HOME/hub/cache"
 jq -cn '{fetchedAt:1, ok:true, prs:[{number:7, headRefName:"cloud/r1", closedAt:"2026-01-01T00:00:00Z"}, {number:12, headRefName:"cloud/r1"}, {number:3, headRefName:"other"}]}' > "$OSRC_HOME/hub/cache/gh-acme_app.json"
-l="$(lib _osrc_hub_lanes_prs '[{"id":"r1","branch":"cloud/r1"},{"id":"r2","branch":"none"},{"id":"r3","branch":"other","prs":"#99"}]')"
+l="$(lib _osrc_hub_lanes_prs '[{"id":"r1","branch":"cloud/r1"},{"id":"r2","branch":"none"},{"id":"r3","branch":"other","prs":"#99"}]' acme/app)"   # the card's repo (F41: none = no lookup)
 jq -e '.[0].prs == "#12" and (.[1] | has("prs") | not) and .[2].prs == "#99"' <<<"$l" >/dev/null \
   && ok "a lane branch with a known PR shows it (open PR wins; a given prs is kept)" || no "prs from branch: $l"
 l="$(lib _osrc_hub_apply_lane_overrides '[{"id":"a","short":"x","status":"Building"}]' '{"lanes":{"a":{"prs":"#5","status":"Done"}}}')"

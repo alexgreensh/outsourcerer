@@ -152,5 +152,15 @@ if on F40; then
   done
 fi
 
+if on F41; then
+  # No repo on the card: another repo's PR on a common branch name must not be borrowed.
+  mkdir -p "$OSRC_HOME/hub/cache"
+  echo '{"prs":[{"number":9,"headRefName":"main"}]}' > "$OSRC_HOME/hub/cache/gh-other_repo.json"
+  a="$(lib _osrc_hub_lanes_prs '[{"id":"l","status":"Building","branch":"main"}]' '' | jq -r '.[0].prs // "none"')"
+  b="$(lib _osrc_hub_lanes_prs '[{"id":"l","status":"Building","branch":"main"}]' other/repo | jq -r '.[0].prs // "none"')"
+  [ "$a" = none ] && ok "F41: with no repo slug no PR is looked up" || no "F41: borrowed $a from another repo"
+  [ "$b" = '#9' ] && ok "F41: with the card's repo the PR is found" || no "F41: own repo PR reads $b"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

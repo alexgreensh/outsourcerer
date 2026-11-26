@@ -69,14 +69,16 @@ _osrc_hub_landed() {
   return 1
 }
 
-# _osrc_hub_lanes_prs <lanes-json> [repo-slug] -> the lanes, each with a branch and no prs given the
+# _osrc_hub_lanes_prs <lanes-json> <repo-slug> -> the lanes, each with a branch and no prs given the
 # PR whose head is that branch (when the cache knows one); an Approved lane whose PR merged reads Merged.
 _osrc_hub_lanes_prs() {
   local h mg
   case "$1" in *'"branch"'*) ;; *) printf '%s' "$1"; return 0 ;; esac   # no branch anywhere: nothing to look up
-  h="$(_osrc_hub_pr_heads "${2:-}")"
+  # No repo known: every repo's cache matched by branch name gave a lane on "main" another repo's PR.
+  [ -n "${2:-}" ] || { printf '%s' "$1"; return 0; }
+  h="$(_osrc_hub_pr_heads "$2")"
   [ "$h" = '{}' ] && { printf '%s' "$1"; return 0; }
-  mg="$(_osrc_hub_pr_heads "${2:-}" merged)"
+  mg="$(_osrc_hub_pr_heads "$2" merged)"
   jq -c --argjson h "$h" --argjson mg "$mg" 'map(if ((.prs // "") == "") and ((.branch // "") != "") and $h[.branch] then . + {prs: $h[.branch]} else . end
     | if .status == "Approved" and $mg[.branch // ""] then . + {status: "Merged", pct: 100} else . end)' <<<"$1" 2>/dev/null || printf '%s' "$1"
 }
