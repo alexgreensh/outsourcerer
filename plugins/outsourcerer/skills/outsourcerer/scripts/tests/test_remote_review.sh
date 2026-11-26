@@ -186,6 +186,11 @@ ql="$(cmd_review queue ls)"; grep -q "STALE" <<<"$ql" && grep -q "re-review" <<<
 tick 1300; ev="$(events)"
 grep -q "^EVENT unreviewed " <<<"$ev" && ok "READY with no review started for OSRC_UNREVIEWED_MIN: EVENT unreviewed" || bad "no unreviewed event: $ev"
 grep -q '^NEXT osrc review next' <<<"$ev" && ok "unreviewed NEXT is review next (reviewer set)" || bad "unreviewed NEXT wrong"
+# A person who ran `review ack` on the queued item has seen it: no more unreviewed nag for that item.
+itq="$lane1-${hfix:0:7}"; cmd_review ack "$itq" >/dev/null; tick 1300; ev="$(events)"
+grep -q "^EVENT unreviewed .*(item $itq)" <<<"$ev" && bad "acked item still nags unreviewed: $ev" || ok "review ack ends the unreviewed nag for that item"
+[ "$(jq -r .state "$OSRC_HOME/review/items/$itq.json")" = queued ] && ok "ack leaves the item queued for the reviewer" || bad "ack moved the item"
+jq '.acked=false' "$OSRC_HOME/review/items/$itq.json" > "$TMP/x.json" && mv "$TMP/x.json" "$OSRC_HOME/review/items/$itq.json"   # later sections use this item
 
 # ---- 9. stalled remote -----------------------------------------------------------------------------
 cmd_lane add cloud3 --branch cloud/v3 --repo "$REMOTE" >/dev/null; push cloud/v3 "wip" >/dev/null; tick 1; events >/dev/null

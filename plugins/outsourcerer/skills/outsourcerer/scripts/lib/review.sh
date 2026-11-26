@@ -445,7 +445,8 @@ osrc_review_events() {
     stale="$(jq -r .stale "$p")"
     case "$st" in
       queued) nq=$((nq+1)); [ -n "$oldest" ] || oldest="$id"
-        if [ $(( now - $(jq -r .enq_ts "$p") )) -ge "$un" ] && _osrc_ev_due "$lane" "unreviewed:$id" "$un"; then
+        # acked = a person has seen it (review ack): it stays queued but no longer nags.
+        if [ "$(jq -r .acked "$p")" != true ] && [ $(( now - $(jq -r .enq_ts "$p") )) -ge "$un" ] && _osrc_ev_due "$lane" "unreviewed:$id" "$un"; then
           _osrc_emit unreviewed "$lane" "READY $sha7 queued $(( (now - $(jq -r .enq_ts "$p")) / ${OSRC_TIME_UNIT:-60} ))m with no review started (item $id)" "$(_osrc_review_next_cmd "$s")"
         fi ;;
       inflight) inflight="$id" ;;

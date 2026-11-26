@@ -258,7 +258,7 @@ osrc_mc_alerts() {
   else
     for f in "$OSRC_HOME"/review/items/*.json; do
       [ -f "$f" ] || continue
-      id="$(jq -r 'select(.state == "queued") | .lane // empty' "$f" 2>/dev/null)"; [ -n "$id" ] || continue
+      id="$(jq -r 'select(.state == "queued" and .acked != true) | .lane // empty' "$f" 2>/dev/null)"; [ -n "$id" ] || continue
       [ -e "$OSRC_HOME/owners/$slug/$id" ] || continue
       since="$(_sv_num "$(jq -r '.enq_ts // 0' "$f" 2>/dev/null)" 0)"
       [ "$since" -gt 0 ] && [ $(( now - since )) -ge "$un" ] || continue

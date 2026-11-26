@@ -35,7 +35,7 @@ _osrc_hub_fast_memo_init() {
         "${rfiles[@]}" 2>/dev/null | while IFS="$(printf '\t')" read -r rl rj; do
           _osrc_hub_slug_ok "$rl" && printf '%s\n' "$rj" > "$d/rneeds/$rl.json"
         done
-      jq -rs '.[] | select(.state == "queued" and (.lane | type) == "string") | "\(.lane)\t\(.enq_ts // 0)"' \
+      jq -rs '.[] | select(.state == "queued" and .acked != true and (.lane | type) == "string") | "\(.lane)\t\(.enq_ts // 0)"' \
         "${rfiles[@]}" > "$d/review_queued.tsv" 2>/dev/null || : > "$d/review_queued.tsv"
     else
       printf '{}' > "$d/review_map.json"

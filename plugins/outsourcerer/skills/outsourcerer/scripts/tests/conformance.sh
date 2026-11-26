@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/lib_sigint.sh" && _osrc_sigint_restore "$@"; _osrc_sigint_rc=$?   # before any trap or scratch dir
 . "$(dirname "${BASH_SOURCE[0]}")/lib_scratch.sh" || exit 1
 # sealed-run-requires: nested-sandbox
 # conformance.sh — U5: per-lane conformance harness (the don't-ship-blind gate).
@@ -170,6 +171,7 @@ _ALL_SUITES="$_ALL_SUITES test_no_pipe_grep_q test_no_pipe_grep_q_fixtures test_
 _ALL_SUITES="$_ALL_SUITES test_no_dead_pid_scan"
 _ALL_SUITES="$_ALL_SUITES test_python_utf8"
 _ALL_SUITES="$_ALL_SUITES test_release_0175"
+_ALL_SUITES="$_ALL_SUITES test_sigint_ignored_start"
 _ALL_SUITES="$_ALL_SUITES test_lane_coord test_send_lock_wait"   # file leases + inbox --wait; concurrent sends wait for the ledger lock
 _PYTHON_SUITES="test_approval_audit test_shim test_sealed_runner test_sealed_fixes test_review_packet test_supervise_signal test_lean_launch test_rotation_context test_supervise_auto test_agentic_local_cert test_review_lifecycle test_supervise_tick test_sandbox_final test_shell_scratch"
 _ALL_SUITES="$_ALL_SUITES $_PYTHON_SUITES"
@@ -365,6 +367,18 @@ case "${OSRC_CONFORMANCE_SHARD:-}" in
        _RUN_SUITES="$_sh_list"; echo "shard $_sh_i/$_sh_n:$(echo $_sh_list | wc -w) suites" ;;
   *) echo "FAIL: OSRC_CONFORMANCE_SHARD must be i/n"; exit 1 ;;
 esac
+# SIGINT still ignored (no python3/perl to reset it, see lib_sigint.sh): these suites assert INT
+# traps, which cannot install, so they SKIP with the reason instead of failing for it.
+if [ "$_osrc_sigint_rc" -ne 0 ]; then
+  _INT_SKIP="test_p56_r2 test_conformance_suite_timeout test_factory_flow"; _kept=""
+  for t in ${_RUN_SUITES-$_ALL_SUITES}; do
+    case " $_INT_SKIP " in
+      *" $t "*) note "$t: SIGINT was ignored when the gate started (a background job of a script) and no python3 or perl could reset it, so its INT traps cannot install; run the gate from a foreground shell" ;;
+      *) _kept="$_kept $t" ;;
+    esac
+  done
+  _RUN_SUITES="$_kept"
+fi
 _conf_tmux_dir="$(mktemp -d "${TMPDIR%/}/osrc-conf-tmux.XXXXXX")" || { echo "FAIL: mktemp for the tmux sandbox"; exit 1; }
 [ -d "$_conf_tmux_dir" ] || { echo "FAIL: tmux sandbox missing"; exit 1; }
 # A PATH shim routes EVERY tmux call a suite makes — its own and the engine's — onto a private

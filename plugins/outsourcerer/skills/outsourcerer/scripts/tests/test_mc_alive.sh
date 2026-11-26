@@ -221,6 +221,11 @@ grep -q "^EVENT unreviewed unm " <<<"$ev" && ! grep -q "^EVENT unreviewed mg " <
 ev2="$(lib osrc_remote_events 2>/dev/null)"
 ! grep -q "^EVENT unreviewed" <<<"$ev2" \
   && ok "remote events: no READY-no-review backstop once merged items close" || no "remote events: $ev2"
+# review ack on the still-queued item: Mission Control drops its unreviewed alert too.
+jq '.acked=true' "$OSRC_HOME/review/items/unm-${H_OPEN:0:7}.json" > "$TMP/unm.ack" && mv "$TMP/unm.ack" "$OSRC_HOME/review/items/unm-${H_OPEN:0:7}.json"
+p="$(lib osrc_mc_alerts S '{"id":"S"}')"
+jq -e '[.alerts[]? | select(.kind == "unreviewed")] | length == 0' <<<"$p" >/dev/null \
+  && ok "Mission Control: an acked queued item raises no unreviewed alert" || no "acked item still alerts: $p"
 
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" = 0 ]

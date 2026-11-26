@@ -8389,8 +8389,9 @@ _heartbeat_leader_evict_stale() {
 
 _heartbeat_beacon() {
   local token="${1:-${OSRC_HEARTBEAT_TOKEN:-}}" cadence="${OSRC_HEARTBEAT_CADENCE:-300}"
-  local pid_start rc
+  local pid_start rc waited slice="${OSRC_HEARTBEAT_IDLE_CHECK:-30}"
   case "$cadence" in ''|*[!0-9]*|0) cadence=300 ;; esac
+  case "$slice" in ''|*[!0-9]*|0) slice=30 ;; esac; [ "$slice" -le "$cadence" ] || slice="$cadence"
   [ -n "$token" ] || token="$(_heartbeat_token)"
   pid_start="$(_pid_start_identity "$$")" || {
     echo "outsourcerer: heartbeat ownership unknown; stable process identity unavailable" >&2
@@ -8414,10 +8415,10 @@ _heartbeat_beacon() {
     _heartbeat_is_owner "$token" "$$" "$pid_start" || return 0
     _heartbeat_tick || true
     [ "${OSRC_HEARTBEAT_ONCE:-0}" = "1" ] && break
-    # A beacon exists only to watch supervised work.  Do not leave a sleeping
-    # 300-second process after the final job finishes.
+    # A beacon exists only to watch supervised work. Wait out the cadence in slices and stop waiting
+    # once no work is left: the next pass ticks once more (reporting the finish) and then ends.
     _heartbeat_active_work || break
-    sleep "$cadence"
+    waited=0; while [ "$waited" -lt "$cadence" ]; do sleep "$slice"; waited=$((waited + slice)); _heartbeat_active_work || break; done
   done
 }
 
@@ -10466,11 +10467,8 @@ cmd_bg() {
   local id; id="$(_bg_launch "$@")"
   [ -n "$id" ] || die "bg: launch failed -- no job id was minted (nothing was started)."
   echo "$id"
-  # PROVIDER is only the DEFAULT lane. A model alias routes per-model (`-m terra` goes to codex-native
-  # even while the default provider is devin), and that decision is made in the detached child, after
-  # this line prints. Stating "provider=devin" for a job that ran on codex-native is the tool lying
-  # about its own routing, so name it as a default and point at the record that is actually true.
-  echo "[outsourcerer] job $id launched (default lane: $PROVIDER; a model alias can route it elsewhere, and '$0 status $id' shows the model it really ran)." >&2
+  # PROVIDER/_OSRC_PIN_MODEL are the preflight's pinned route; the child refuses to dispatch any other.
+  echo "[outsourcerer] job $id launched on lane $PROVIDER, model $_OSRC_PIN_MODEL ('$0 status $id' shows what it ran)." >&2
   echo "[outsourcerer] NOW WATCH IT: $0 watch $id     (it runs unobserved until you do; status/result: $0 status $id | $0 result $id)" >&2
   _wake_on_finish_hint "$id"; _async_supervision_notice
 }

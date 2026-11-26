@@ -74,6 +74,29 @@ got="$(_reconcile_status finishedjob 2>/dev/null || echo '?')"
 [ "$got" = "done" ] && ok "a dead-pid job already marked terminal stays 'done' (no interrupted clobber)" \
   || bad "reconcile clobbered a terminal 'done' with '$got' (lost update)"
 
+# 5. The beacon ends with its last job, not a full cadence later. A 300 s cadence with the last job
+#    finishing 1 s in: the beacon must tick once more (reporting the finish) and exit within seconds.
+#    Claim/ownership/tick are stubbed; only the beacon's own wait loop is under test.
+WORK="$TMP/work-flag"; : > "$WORK"; TICKS="$TMP/ticks"; : > "$TICKS"
+(
+  set +u   # the beacon's EXIT trap names its local token after the function has returned
+  _pid_start_identity() { echo fixed; }; _heartbeat_claim() { return 0; }; _heartbeat_stop() { :; }
+  _heartbeat_is_owner() { return 0; }; _heartbeat_tick() { echo t >> "$TICKS"; }
+  _heartbeat_active_work() { [ -f "$WORK" ]; }; _OSRC_CALLER_EXIT=""
+  OSRC_HEARTBEAT_CADENCE=300 OSRC_HEARTBEAT_IDLE_CHECK=1 _heartbeat_beacon tok
+) &
+bpid=$!
+sleep 1; rm -f "$WORK"
+i=0; while kill -0 "$bpid" 2>/dev/null && [ "$i" -lt 80 ]; do sleep 0.1; i=$((i+1)); done
+if kill -0 "$bpid" 2>/dev/null; then
+  bad "beacon still alive 8s after its last job finished (it sleeps the whole cadence)"
+  pkill -P "$bpid" 2>/dev/null; kill "$bpid" 2>/dev/null
+else
+  [ "$(wc -l < "$TICKS" | tr -d ' ')" -ge 2 ] && ok "beacon ends within seconds of its last job, after one final tick" \
+    || bad "beacon ended without a final tick (ticks=$(wc -l < "$TICKS" | tr -d ' '))"
+fi
+wait "$bpid" 2>/dev/null
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

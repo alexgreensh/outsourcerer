@@ -111,8 +111,8 @@ awk '/_timeout "\$\{OSRC_DOCTOR_PROBE_TIMEOUT/{found=1} END{exit !found}' "$SRC"
 grep -q 'launched (provider=\$PROVIDER)' "$SRC" \
   && bad "the launch banner still states the default provider as if it were the resolved lane" \
   || ok "the launch banner does not claim a lane it cannot know yet"
-grep -q 'default lane: \$PROVIDER' "$SRC" \
-  && ok "the launch banner labels the provider as a default and points at the real record" \
+grep -q 'launched on lane \$PROVIDER, model \$_OSRC_PIN_MODEL' "$SRC" \
+  && ok "the launch banner names the pinned lane and model and points at the real record" \
   || bad "the launch banner gives no pointer to the lane actually used"
 
 echo
