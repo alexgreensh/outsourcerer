@@ -46,3 +46,26 @@ Paths below are relative to `plugins/outsourcerer/skills/outsourcerer/scripts/`.
 - Test: `tests/test_heartbeat_immortal_beacon.sh` case 5 (300 s cadence, last job ends at 1 s: beacon
   must exit within 8 s after a final tick). Before: `passed=4 failed=1`. After: `passed=5 failed=0`.
   Also green: `test_heartbeat_single_instance` (7/0), `test_heartbeat_autoarm` (6/0), `test_heartbeat_ownership` (12/0).
+
+## Item 8: the gate started with SIGINT ignored
+- New `tests/lib_sigint.sh`: `_osrc_sigint_ignored` (pure bash: a trap set in a subshell reads back as
+  `trap -- '' SIGINT` only when SIGINT was ignored at entry) and `_osrc_sigint_restore`, which re-execs
+  the caller once with SIGINT at default through a python3 or perl shim (sigaction + exec, nothing else;
+  `OSRC_SIGINT_REEXEC` stops a loop). `tests/conformance.sh` calls it on line 2, before any trap or
+  scratch dir. When no shim exists, `test_p56_r2`, `test_conformance_suite_timeout` and `test_factory_flow`
+  SKIP with the reason; never a silent FAIL or PASS.
+- New suite `tests/test_sigint_ignored_start.sh` (registered): background start re-execs with SIGINT
+  restored and argv intact; no-shim reports still-ignored; foreground is untouched; the gate is wired.
+  Before (gate not wired): `4 passed, 2 failed`. After: `6 passed, 0 failed`.
+- Real gate, one-suite shards started as `bash -c 'bash conformance.sh & wait'` (SIGINT ignored):
+
+  | suite | base | this branch |
+  |---|---|---|
+  | test_conformance_suite_timeout | FAIL `suite INT trap did not fire` | green, gate rc 0 |
+  | test_factory_flow | FAIL `caller traps lost: trap -- '' SIGINT` | green, gate rc 0 |
+  | test_p56_r2 | FAIL incl. `test 1 = 0` | `test 1 = 0` gone; 3 opencode failures remain |
+  | test_p56_r2, no python3/perl on PATH | n/a | SKIP with the reason, gate rc 0 |
+
+  The 3 remaining `test_p56_r2` failures (`test  = opencode`, `test  = credits`, `_probe_opencode`) also
+  happen in a plain foreground shell on the base commit in this container. They are not SIGINT-related
+  and are not in this lane's scope.
