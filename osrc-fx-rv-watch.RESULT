@@ -1,3 +1,0 @@
-sha=80575c4ce439b7b8317f92751f9602cee49210b6
-rc=1
-All 12 findings fixed, each with a regression test (tests/test_rv_watch.sh: 22 pass, 0 fail). conformance.sh: 272 passed, 4 failed. All 4 failures also fail on the base 80575c4 (three are read-only checks that root bypasses; one is test_disk_r2, disk lane). Head: see branch cloud/osrc-fx-rv-watch; report reports/osrc-fx-rv-watch.md.

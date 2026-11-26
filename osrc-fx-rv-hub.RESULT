@@ -1,7 +1,0 @@
-sha=80575c4ce439b7b8317f92751f9602cee49210b6
-rc=1
-All 27 findings F32-F58 fixed, one commit each (plus named follow-ups); new suites test_rv_hub (55/0) and test_rv_factory (18/0) green.
-conformance.sh rc=1: 270 passed, 7 failed. Two failures were this lane's (test_hub_home, test_python_utf8) and are fixed after the run (rc 0 alone).
-Four (test_vocab_hygiene, test_harness_isolation, test_parity_insource_refresh, test_disk_r2) fail identically on the pinned base (root container).
-test_mc_alive failed once under parallel load and passes alone (59/0); unproven flake.
-Lane head: the commit that adds this file (parent 657a258). Report: reports/osrc-fx-rv-hub.md
