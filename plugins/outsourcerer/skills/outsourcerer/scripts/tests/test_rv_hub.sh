@@ -71,5 +71,19 @@ if on F34; then
   else no "F34: the hub did not start: $(cat "$SRV_HOME/err")"; fi
 fi
 
+if on F35; then
+  # One project rebuilt while full exports fail: the doc keeps its old generated_at (the page's
+  # "lane data from N ago" hint stays honest for every other project); only that project is stamped now.
+  mkdir -p "$TMP/f35/hub"; printf '#!/bin/sh\necho '"'"'{"generated_at":1,"projects":[{"id":"a","name":"A2"}]}'"'"'\n' > "$TMP/f35/engine"; chmod +x "$TMP/f35/engine"
+  r="$(cd "$LIB" && T="$TMP/f35" python3 -I -c '
+import os, sys, time; sys.path.insert(0, os.getcwd()); import hub_server as h
+t = os.environ["T"]; hub = h.Hub(t, t + "/engine", "hub.html", "x")
+hub.cache = {"generated_at": 1000, "projects": [{"id": "a", "name": "A"}, {"id": "b", "name": "B"}]}
+d = hub._merge_project_export("a", 10); now = time.time()
+pa = [p for p in d["projects"] if p["id"] == "a"][0]; pb = [p for p in d["projects"] if p["id"] == "b"][0]
+print(d["generated_at"], pa["name"], abs(pa.get("generated_at", 0) - now) < 30, "generated_at" in pb)' 2>&1)"
+  [ "$r" = "1000 A2 True False" ] && ok "F35: a one-project refresh keeps the doc's generated_at and stamps only that project" || no "F35: $r"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]

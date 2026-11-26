@@ -322,6 +322,8 @@ class Hub:
         if not isinstance(doc, dict) or not isinstance(doc.get("projects"), list):
             raise RuntimeError("export output is not a SCHEMA document")
         pj = doc["projects"][0] if doc["projects"] else None
+        if isinstance(pj, dict):   # only this project is new; the doc keeps the age of the rest
+            pj = dict(pj, generated_at=int(time.time()))
         with self.lock:
             data = dict(self.cache)
             projects = [pj if isinstance(pj, dict) and p.get("id") == slug else p
@@ -329,7 +331,6 @@ class Hub:
             if pj is None:
                 projects = [p for p in data.get("projects", []) if p.get("id") != slug]
             data["projects"] = projects
-            data["generated_at"] = int(time.time())
         data["exported_at"] = int(time.time())
         data = self._with_status(data)
         self._safe_write("", "export.json", data)
