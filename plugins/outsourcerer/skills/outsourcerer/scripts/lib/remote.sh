@@ -256,9 +256,11 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     else tree="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"; fi
     grep -qxF "$id.READY" <<<"$tree" && grep -qxF "$id.RESULT" <<<"$tree" && ready=true
   fi
-  # A READY head whose own RESULT reports a failing rc is a failed lane, not one to review.
+  # A READY head whose own RESULT (in the tip's files or tree) reports a failing rc is a failed lane,
+  # not one to review. No RESULT listed: no extra call.
   local rrc=""
-  if [ "$ready" = true ]; then
+  if [ "$ready" = true ] && grep -qxF "$id.RESULT" <<<"$names
+$tree"; then
     if [ "$transport" = gh ]; then rrc="$(_osrc_net gh api -H 'Accept: application/vnd.github.raw' "repos/$url/contents/$id.RESULT?ref=$head" 2>/dev/null)"
     else rrc="$(git --git-dir="$cache" show "$head:$id.RESULT" 2>/dev/null)"; fi
     rrc="$(sed -n '2s/^rc=\([0-9][0-9]*\).*/\1/p' <<<"$rrc")"
