@@ -80,32 +80,19 @@ _osrc_hub_lane_status() {
   case "$st" in
     live|working|running|launching|stalled\?|exploring\?|no-progress-writes|ready)
       [ "$rv" = "" ] && [ "$st" = "ready" ] && st="Review" || st="Building" ;;
-    idle) st="Idle" ;;
+    idle) st="Idle" ;; paused) st="Paused"; extra="${extra:+$extra; }paused: free disk is under the floor" ;;
     waiting) st="Blocked"; extra="${extra:+$extra; }waiting on the orchestrator (approval, question or limit)" ;;
-    done|'done?') st="Done" ;;
+    done) st="Done" ;; 'done?') st="Unverified"; extra="${extra:+$extra; }finished without its done marker: check the result" ;;
     blocked|permission-blocked) st="Blocked" ;;
     failed|wedged|timeout) st="Failed" ;;
     canceled|interrupted) st="Canceled" ;;
     gone) st="" ;;
-    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled) : ;;
+    Merged|Blocked|Done|Building|Review|Shipped|Idle|Failed|Canceled|Unverified|Paused) : ;;
     *) st="Building" ;;
   esac
   local pct=""
   case "$st" in Done|Merged|Shipped) pct="100" ;; esac
   printf '%s|%s|%s' "$st" "$pct" "$extra"
-}
-
-_osrc_hub_job_state() {
-  local id="$1" jd="$OSRC_JOBS/$1" st rc
-  st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null)"
-  case "$st" in running|working|live|launching|stalled\?|exploring\?|no-progress-writes)
-    # A supervisor may outlive the delegate whose exit it has already recorded.
-    if [ -s "$jd/exit" ]; then
-      rc="$(cat "$jd/exit" 2>/dev/null)"
-      case "$rc" in 0) st=done ;; ''|*[!0-9]*) : ;; *) st=failed ;; esac
-    fi ;;
-  esac
-  printf '%s' "$st"
 }
 
 _osrc_hub_lane_job() { # <id> -> lane json or nothing
@@ -126,6 +113,8 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   reason="$(head -1 "$jd/reason" 2>/dev/null)"
   ds="$(_osrc_hub_done_state "$id")"
   [ "$ds" = "done" ] && st="done"
+  case "$st:$reason" in done:exited-0-without-OSRC-DONE*) st='done?' ;; esac   # exit 0 is not proof of done
+  _osrc_hub_paused "$id" "$st" && st=paused
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "${reason:-$st}")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
@@ -151,6 +140,7 @@ _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach targe
   st="$(_owned_live_state "$id" 2>/dev/null)"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.ols"
   ds=""; ds="$(_osrc_hub_done_state "$id")"; [ "$ds" = "done" ] && st="done"
+  _osrc_hub_ad_failed "$id" && st=failed; _osrc_hub_paused "$id" "$st" && st=paused   # lib/hub-lanemeta.sh
   case "$st" in gone) return 1 ;; esac
   model="$(type _session_registry_last_event >/dev/null 2>&1 && _session_registry_last_event "$id" 2>/dev/null | jq -r '"\(.provider // "")\u001f\(.resolved_model // .model // "")"' 2>/dev/null)"
   _OSRC_LL=""; [ -z "${model%%$'\037'*}" ] || ! type _osrc_hub_lane_label >/dev/null 2>&1 || _osrc_hub_lane_label "${model%%$'\037'*}"; model="${model#*$'\037'}"
@@ -215,6 +205,7 @@ _osrc_hub_lane_fallback() { # <id> -> lane json or nothing
   st="$(_owned_live_state "$id" 2>/dev/null)"
   case "$st" in gone|"") return 1 ;; esac
   ds="$(_osrc_hub_done_state "$id")"; [ "$ds" = "done" ] && st="done"
+  _osrc_hub_ad_failed "$id" && st=failed; _osrc_hub_paused "$id" "$st" && st=paused
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "$st")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; local note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
@@ -316,7 +307,7 @@ _osrc_hub_build_project() {
       type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lane.${t##*/}.done"
       [ "${act%% *}" -gt "$lact" ] 2>/dev/null && lact="${act%% *}"
       if [ "${act##* }" = 1 ] && ! jq -e '.state == "idle" or .state == "done" or .state == "failed" or
-          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
+          (.status | IN("Done", "Merged", "Failed", "Canceled", "Shipped", "Unverified"))' >/dev/null 2>&1 <<<"$lane"; then llive=1; fi
     done
   fi
   [ -z "$olanes" ] || lanes="$(printf '%s' "$olanes" | jq -cs . 2>/dev/null)" || lanes='[]'   # one jq, not one per lane
@@ -995,3 +986,4 @@ cmd_hub() {
 # helpers that source hub.sh alone would otherwise get no lanes at all, so pull it in here when missing.
 type _osrc_hub_truth >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-truth.sh" ] && . "$_osrc_hub_d/hub-truth.sh"; unset _osrc_hub_d; }
 type _osrc_hub_lane_for >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanename.sh" ] && . "$_osrc_hub_d/hub-lanename.sh"; unset _osrc_hub_d; }
+type _osrc_hub_job_state >/dev/null 2>&1 || { _osrc_hub_d="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; [ -r "$_osrc_hub_d/hub-lanemeta.sh" ] && . "$_osrc_hub_d/hub-lanemeta.sh"; unset _osrc_hub_d; }

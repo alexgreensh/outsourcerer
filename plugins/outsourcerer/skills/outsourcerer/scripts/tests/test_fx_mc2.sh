@@ -64,8 +64,8 @@ jq -e '.[0].prs == "#12" and (.[1] | has("prs") | not) and .[2].prs == "#99"' <<
 l="$(lib _osrc_hub_apply_lane_overrides '[{"id":"a","short":"x","status":"Building"}]' '{"lanes":{"a":{"prs":"#5","status":"Done"}}}')"
 jq -e '.[0].prs == "#5" and .[0].status == "Building"' <<<"$l" >/dev/null && ok "prs passes through card overrides (status still computed)" || no "override: $l"
 grep -q 'headRefName' "$SCRIPT_DIR/../lib/hub-history.sh" && ok "the one existing gh pr list call also fetches the head branch (no new call)" || no "no headRefName"
-for c in dv:Devin cx:Codex cc:"Claude Code" droid:"Factory Droid"; do
-  [ "$(S "_osrc_hub_lane_label ${c%%:*}; printf %s \"\$_OSRC_LL\"")" = "${c#*:}" ] || no "label ${c%%:*}"; done; ok "lane codes read as human lane names"
+lk=0; for c in dv:Devin cx:Codex cc:"Claude Code" droid:"Factory Droid"; do
+  [ "$(S "_osrc_hub_lane_label ${c%%:*}; printf %s \"\$_OSRC_LL\"")" = "${c#*:}" ] || { no "label ${c%%:*}"; lk=1; }; done; [ "${lk:-0}" = 0 ] && ok "lane codes read as human lane names"
 own S w2; pane w2 cc-working-turn.txt
 lib _sg_card_nag S >/dev/null && no "a card-less owner was nagged before its waiter check" || ok "the early card check still skips a session with no card"
 r="$(_SG_CARD_OWNED=1 lib _sg_card_nag S)" && grep -q 'last reported never' <<<"$r" && ok "a session that owns lanes and never reported is asked for its card" || no "owned, no card: [$r]"
@@ -110,9 +110,9 @@ case "$n1" in com.outsourcerer.watcher.????????) [ "$n1" != "$n2" ] && ok "a san
 echo "=== concurrency F2: one ticking watcher loop after a stale-lock takeover ==="
 fresh 5; mkdir -p "$OSRC_HOME/watchsvc/run.lock"; osrc_test_dead_pid > "$OSRC_HOME/watchsvc/run.lock/pid"; ago "$OSRC_HOME/watchsvc/run.lock" 600
 for i in 1 2 3 4 5 6; do
-  OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { echo $$ >> "$OSRC_HOME/ticks"; }; while [ ! -f "$OSRC_HOME/go" ]; do :; done; _ws_run' "$SRC" watcher run >/dev/null 2>&1 &
+  OSRC_SOURCED=1 OSRC_WATCH_INTERVAL=1 bash -c '. "$0" >/dev/null 2>&1; _ws_tick() { echo $$ >> "$OSRC_HOME/ticks"; }; while [ ! -f "$OSRC_HOME/go" ]; do sleep 0.02; done; _ws_run' "$SRC" watcher run >/dev/null 2>&1 &
   PIDS="$PIDS $!"; done
-sleep 0.5; : > "$OSRC_HOME/go"; sleep 3
+sleep 1; : > "$OSRC_HOME/go"; i=0; until [ -s "$OSRC_HOME/ticks" ] || [ "$i" -ge 75 ]; do sleep 0.2; i=$((i+1)); done; sleep 2.5   # a winner ticks every second
 n="$(sort -u "$OSRC_HOME/ticks" 2>/dev/null | grep -c .)"
 [ "$n" = 1 ] && ok "six starters race a dead owner's lock: exactly one loop ticks" || no "$n loops ticked"
 for p in $PIDS; do kill "$p" 2>/dev/null; done
@@ -183,6 +183,54 @@ grep -q '^EVENT stalled s1 .*no push yet after 60m (session https://claude.ai/co
   && ok "a lane whose vehicle reported a live session is quiet (stalled), not 'failed: never started'" || no "live-session lane: $ev"
 grep -q '^EVENT failed s2 .*never started' <<<"$ev" && ok "a launch with no session URL still reports never started" || no "no-session lane: $ev"
 [ "$(S 'osrc_remote_state s1')" = live ] && ok "osrc_remote_state still answers from the one-jq record" || no "state: $(S 'osrc_remote_state s1')"
+
+echo "=== performance F6: the Stop hook ==="
+fresh 10; HOOKS="$SCRIPT_DIR/../../../../hooks/hooks.json"; hook="$(jq -r '.hooks.Stop[0].hooks[0].command' "$HOOKS")"
+printf '#!/bin/sh\necho x >> "%s/jqlog/n"\nexec "%s" "$@"\n' "$TMP" "$RJQ" > "$TMP/jqlog/jq"; chmod +x "$TMP/jqlog/jq"
+mkdir -p "$TMP/eng"; printf '#!/bin/sh\necho engine >> "%s/eng/ran"\ncat > "%s/eng/in"\n' "$TMP" "$TMP" > "$TMP/eng/outsourcerer.sh"; chmod +x "$TMP/eng/outsourcerer.sh"
+mkdir -p "$TMP/eng/lib"; cp "$SCRIPT_DIR/../lib/stopguard_pre.sh" "$TMP/eng/lib/"
+run_hook() { printf '%s' "$1" | CLAUDE_PLUGIN_ROOT="$TMP/plug" sh -c "$hook"; }
+mkdir -p "$TMP/plug/skills/outsourcerer"; ln -sfn "$TMP/eng" "$TMP/plug/skills/outsourcerer/scripts"
+run_hook '{"session_id":"quiet-1"}'
+[ ! -e "$TMP/eng/ran" ] && ok "a session that owns nothing and has no card: the hook allows without loading the engine" || no "engine loaded for a quiet session"
+own quiet-1 L1; run_hook '{"session_id": "quiet-1", "cwd":"/x"}'
+grep -q engine "$TMP/eng/ran" 2>/dev/null && grep -qF '"session_id": "quiet-1"' "$TMP/eng/in" && ok "a session that owns a lane gets the full guard, its input unchanged" || no "owned session skipped or input lost: $(cat "$TMP/eng/in" 2>/dev/null)"
+rm -f "$TMP/eng/ran"; run_hook '{"session_id":"we/ird"}'; [ -e "$TMP/eng/ran" ] && ok "an unusual session id is never short-circuited" || no "odd id short-circuited"
+mkdir -p "$OSRC_HOME/hub/projects"
+jq -cn '{name:"P", reportedAt:"2020-01-01T00:00:00Z", board:{tasks:[{short:"T", model:"m", lane:"l"}], decisions:[{id:"D1", q:"old?", askedAt:"2020-01-01T00:00:00Z"}]}}' > "$OSRC_HOME/hub/projects/quiet-1.json"
+rm -f "$TMP/jqlog/n"; r="$(PATH="$TMP/jqlog:$PATH" S '_sg_card_nag quiet-1')"
+[ "$(grep -c . "$TMP/jqlog/n")" -le 1 ] && grep -q 'D1 (old?)' <<<"$r" && grep -q 'for "P" was last reported' <<<"$r" \
+  && ok "the card check reads the card with one jq ($(grep -c . "$TMP/jqlog/n")), same verdict" || no "card check: $(grep -c . "$TMP/jqlog/n") jq; [$r]"
+
+echo "=== performance F5: hub export execs ==="
+fresh 11; for i in $(seq 1 40); do own S "gone-$i"; done; ago "$OSRC_HOME/owners/S/gone-1" 600
+printf '#!/bin/sh\necho x >> "%s/jqlog/stat"\nexec "%s" "$@"\n' "$TMP" "$(command -v stat)" > "$TMP/jqlog/stat"; chmod +x "$TMP/jqlog/stat"
+rm -f "$TMP/jqlog/stat.n"; sed -i "s|jqlog/stat\"|jqlog/stat.n\"|" "$TMP/jqlog/stat"
+( export PATH="$TMP/jqlog:$PATH"; S 'osrc_watcher_gap S >/dev/null' )
+[ "$(grep -c . "$TMP/jqlog/stat.n" 2>/dev/null || echo 0)" -le 1 ] && ok "the watcher gap reads 40 owner markers with one stat" || no "watcher gap: $(grep -c . "$TMP/jqlog/stat.n") stat calls for 40 markers"
+mkdir -p "$OSRC_HOME/supervise/S"
+r="$(S 'cmd_hub_export() { printf "%s\n" "${OSRC_HUB_FAST:-0}" > "$OSRC_HOME/fast.seen"; echo "{\"projects\":[],\"limits\":[]}"; }; _sv_card_event() { :; }; _sv_tick "$OSRC_HOME/supervise/S" "$(date +%s)"; echo rc=$?')"
+[ "$(cat "$OSRC_HOME/fast.seen" 2>/dev/null)" = 1 ] && ok "supervise's 10-min export uses the page's cached path (no inline plan probes)" || no "supervise export not cached: $(cat "$OSRC_HOME/fast.seen" 2>/dev/null) [$r]"
+
+echo "=== live F1/F2: Mission Control never rounds a failed, unverified or paused lane up to Done ==="
+fresh 12; mkdir -p "$OSRC_HOME/autodetach"; echo 1 > "$OSRC_HOME/autodetach/ad1.rc"
+l="$(S '_owned_live_state() { echo done; }; osrc_done_state() { echo done; }; _osrc_hub_lane_fallback ad1')"
+jq -e '.status == "Failed" and (has("pct") | not)' <<<"$l" >/dev/null && ok "an auto-detached run that exited 1 is Failed, never Done 100%" || no "autodetach rc 1: $l"
+J=20261126-020202-beef; mkdir -p "$OSRC_HOME/jobs/$J"; echo done > "$OSRC_HOME/jobs/$J/status"; echo 0 > "$OSRC_HOME/jobs/$J/exit"
+echo exited-0-without-OSRC-DONE > "$OSRC_HOME/jobs/$J/reason"; echo '{"provider":"devin","verb":"run"}' > "$OSRC_HOME/jobs/$J/meta.json"
+l="$(OSRC_JOBS="$OSRC_HOME/jobs" S "_reconcile_status() { cat \"\$OSRC_JOBS/\$1/status\"; }; _osrc_hub_lane_job $J")"
+jq -e '.status == "Unverified" and (has("pct") | not)' <<<"$l" >/dev/null && ok "exit 0 without a DONE marker is Unverified, not Done 100%" || no "exited-0: $l"
+r="$(S '_osrc_hub_lane_status "done?" "" x')"; [ "${r%%|*}" = Unverified ] && [ "$(printf '%s' "$r" | cut -d'|' -f2)" = "" ] && ok "'done?' maps to Unverified with no percent" || no "done? -> $r"
+l="$(S '_owned_live_state() { echo live; }; _osrc_disk_target_paused() { [ "$1" = ad2 ]; }; _osrc_hub_lane_fallback ad2')"
+jq -e '.status == "Paused"' <<<"$l" >/dev/null && ok "a disk-paused lane renders as Paused" || no "paused: $l"
+grep -q 's-unverified' "$SCRIPT_DIR/../lib/hub.html" && grep -q "failed: 'octagon-x'" "$SCRIPT_DIR/../lib/hub.html" && ok "the page styles Failed, Unverified and Paused chips" || no "hub.html chips"
+
+echo "=== live F4: run flags after the verb never leak into the delegate's prompt ==="
+lk=0; for fl in --wait --foreground "--no-advise --wait" "--tier budget --wait" "--provider=devin"; do
+  r="$(S "parse_model $fl -m swe-test-1 'say hi'; printf '%s|' \"\${REST[@]}\"; printf '%s' \"\${OSRC_NO_AUTODETACH:-0}\"")"
+  case "$r" in "say hi|"*) ;; *) no "parse_model $fl left REST=[$r]"; lk=1 ;; esac
+done; [ "$lk" = 0 ] && ok "--wait, --foreground, --no-advise, --tier and --provider= after the verb are flags, not task text" || no "a run flag leaked into the prompt"
+r="$(S "parse_model --wait 'x'; printf '%s' \"\${OSRC_NO_AUTODETACH:-0}\"")"; [ "$r" = 1 ] && ok "--wait after the verb still forces the foreground" || no "--wait not honored: $r"
 
 echo
 echo "RESULT: $pass passed, $fail failed"

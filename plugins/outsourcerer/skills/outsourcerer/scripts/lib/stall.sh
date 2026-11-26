@@ -212,10 +212,17 @@ osrc_watcher_gap() { # <sid> [now] -> minutes unwatched + live lane count; rc 1 
   d="$OSRC_HOME/owners/$sid"; [ -d "$d" ] || return 1
   osrc_session_watched "$sid" && return 1
   last="$(_sv_num "$(cat "$OSRC_HOME/supervise/$sid/alive" 2>/dev/null)" 0)"
+  local -a ms=()
   for f in "$d"/*; do
     [ -f "$f" ] || continue
     case "${f##*/}" in .*|watch.*) continue ;; esac
-    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null)"; m="$(_sv_num "$m" 0)"
+    ms+=("$f")
+  done
+  [ "${#ms[@]}" -gt 0 ] || return 1
+  # ONE stat for every marker (one per marker was ~50 forks per hub export on a state home with old
+  # markers). GNU first: GNU `stat -f` is filesystem status.
+  for m in $(stat -c %Y "${ms[@]}" 2>/dev/null || stat -f %m "${ms[@]}" 2>/dev/null); do
+    case "$m" in ''|*[!0-9]*) continue ;; esac
     { [ "$start" = 0 ] || [ "$m" -lt "$start" ]; } && start="$m"
   done
   [ "$start" -gt 0 ] || return 1

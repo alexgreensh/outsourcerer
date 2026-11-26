@@ -545,7 +545,9 @@ _sv_tick() { # <owner state dir> <epoch>: refresh both project rows and limits a
     done
   fi
   tmp="$dir/hub.json.tmp.$$"
-  if ! cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then
+  # The page's cached path (lib/hub-perf.sh): limits and settled lanes from their caches, refreshed off
+  # this clock, instead of recomputing the plan meters inline every tick.
+  if ! OSRC_HUB_FAST=1 cmd_hub_export > "$tmp" || ! jq -e '(.projects | type) == "array" and (.limits | type) == "array"' "$tmp" >/dev/null 2>&1; then
     rm -f "$tmp"; return 1
   fi
   mv -f "$tmp" "$dir/hub.json" || return 1

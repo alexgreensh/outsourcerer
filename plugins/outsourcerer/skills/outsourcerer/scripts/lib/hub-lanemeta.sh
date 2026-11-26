@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# lib/hub-lanemeta.sh: who built a Mission Control track (lane, model) and which PR carries it.
+# lib/hub-lanemeta.sh: what a Mission Control track says beyond its raw state: who built it (lane,
+# model), which PR carries it, and states the builders in lib/hub.sh must not round up to "Done".
 # Sourced by outsourcerer.sh; function definitions only.
 #
 # Every track's hover reads "Lane: ...", the model, and its issues and PRs. Board tracks name them in
@@ -62,4 +63,32 @@ _osrc_hub_lanes_prs() {
   h="$(_osrc_hub_pr_heads "${2:-}")"
   [ "$h" = '{}' ] && { printf '%s' "$1"; return 0; }
   jq -c --argjson h "$h" 'map(if ((.prs // "") == "") and ((.branch // "") != "") and $h[.branch] then . + {prs: $h[.branch]} else . end)' <<<"$1" 2>/dev/null || printf '%s' "$1"
+}
+
+# ---- states the builders must not round up -------------------------------------------------------
+_osrc_hub_job_state() {
+  local id="$1" jd="$OSRC_JOBS/$1" st rc
+  st="$(_reconcile_status "$id" 2>/dev/null || cat "$jd/status" 2>/dev/null)"
+  case "$st" in running|working|live|launching|stalled\?|exploring\?|no-progress-writes)
+    # A supervisor may outlive the delegate whose exit it has already recorded.
+    if [ -s "$jd/exit" ]; then
+      rc="$(cat "$jd/exit" 2>/dev/null)"
+      case "$rc" in 0) st=done ;; ''|*[!0-9]*) : ;; *) st=failed ;; esac
+    fi ;;
+  esac
+  printf '%s' "$st"
+}
+
+# _osrc_hub_ad_failed <id> -> 0 when an auto-detached run recorded a non-zero exit (autodetach/<id>.rc):
+# it failed, whatever a done verdict or the closed pane suggests. No fork.
+_osrc_hub_ad_failed() {
+  local rc="" f="$OSRC_HOME/autodetach/$1.rc"
+  [ -s "$f" ] || return 1
+  IFS= read -r rc < "$f" 2>/dev/null; rc="${rc//[!0-9]/}"
+  [ -n "$rc" ] && [ "$rc" != 0 ]
+}
+# _osrc_hub_paused <id> <state> -> 0 when the disk policy paused this still-running lane (lib/disk_policy.sh).
+_osrc_hub_paused() {
+  case "${2:-}" in done|done\?|failed|canceled|gone|interrupted) return 1 ;; esac
+  type _osrc_disk_target_paused >/dev/null 2>&1 && _osrc_disk_target_paused "$1" 2>/dev/null
 }
