@@ -12417,7 +12417,7 @@ $body"
     done
   fi
 
-  local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
+  _osrc_fanout_preflight "$verb"; local gid gd; gid="fanout-$(_new_job_id)"; gd="$(_fanout_dir "$gid")"; mkdir -p "$gd/findings"; : > "$gd/members.tsv"
   type _osrc_created_record >/dev/null 2>&1 && _osrc_created_record "$gd" fanout "$gid" "$PWD" || true
   printf 'provider=%s verb=%s max=%s model=%s effort=%s tier=%s with=[%s] count=%s cwd=%s\n' \
     "${g_prov:-$PROVIDER}" "$verb" "$maxpar" "${g_model:-<per-agent|default>}" "${g_effort:-<per-agent|lane>}" "${g_tier:-<auto>}" "${fwd[*]-}" "${#labels[@]}" "$PWD" > "$gd/manifest.txt"
@@ -18020,7 +18020,7 @@ _loop_check() {
 }
 
 cmd_loop() {
-  local shape="${1:-}"; [ $# -gt 0 ] && shift
+  local shape="${1:-}"; [ $# -gt 0 ] && shift; _osrc_take_spend_ok "$@"; set -- "${_OSRC_ARGS[@]+"${_OSRC_ARGS[@]}"}"
   local resume=0 lid="" ldir=""
   case "$shape" in
     status)
@@ -18054,7 +18054,7 @@ cmd_loop() {
       [ -d "$ldir" ] || die "loop resume: no such loop '$lid' (see: loop status)"
       case "$(cat "$ldir/state" 2>/dev/null)" in
         success) die "loop resume: '$lid' already succeeded; refusing to rerun a successful loop" ;;
-        blocked|max_turns|max_time) ;;
+        blocked|max_turns|max_time|needs-approval) ;;
         *) die "loop resume: '$lid' is not a resumable terminal loop (state: $(cat "$ldir/state" 2>/dev/null || echo '?'))" ;;
       esac
       # An escalate loop's rung position and per-tier stall budget are not saved, so resuming one
@@ -18227,13 +18227,13 @@ Recipes are composed from the existing verbs, not a workflow engine: see referen
 
 The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
 $feedback"
-    # Delegate this attempt via the script itself (reuses all routing/consent/watchdog machinery).
-    # OSRC_NO_AUTODETACH=1 is MANDATORY here, not a preference: a detached delegate returns a job id
+    # Delegate this attempt via the script itself (reuses all routing/consent/watchdog machinery). OSRC_NO_AUTODETACH=1 is MANDATORY here, not a preference: a detached delegate returns a job id
     # immediately, so the acceptance check would run against files the delegate has not touched yet.
     # Every attempt would then see the same pre-edit failure, the stall guard would fire, and the loop
     # would report `blocked` while the real work landed in the background, unwatched. The loop is its
-    # own supervisor and is the thing meant to be long-running, so it always waits in the foreground.
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    # own supervisor and is the thing meant to be long-running, so it always waits in the foreground. Loop consent rides argv.
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" ${mflag:+$mflag "$model"} "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    _osrc_loop_needs_approval verify "$lid" "$ldir" "$attempt" "$0 --spend-ok loop resume $lid" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     # Defense in depth: if a delegate ever detaches anyway, the check below would silently grade stale
     # files. Refuse to grade rather than emit a confident wrong verdict.
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
@@ -18314,7 +18314,7 @@ $feedback"
     printf '[worktree] loop %s: branch %s at %s (ahead %s, dirty %s) — inspect/merge, then: outsourcerer cleanup %s\n' "$lid" "$wbr" "$wt" "$ahead" "$dirty" "$lid" >&2
   fi
   echo "$state"
-  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
+  case "$state" in success) return 0 ;; blocked|needs-approval) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
 # ==========================================================================
@@ -18477,11 +18477,11 @@ EOF
 
 The previous attempt did NOT pass the acceptance check. Fix ONLY what the check reports; do not restyle unrelated code. Acceptance check output:
 $feedback"
-    # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so
-    # the check would grade files that have not been written yet — and on THIS loop a false failure
-    # would also spend the next rung's money. The loop is its own supervisor; it always waits.
+    # Same foreground contract as loop verify: a detached delegate returns a job id instantly, so the check would grade
+    # unwritten files — and a false failure would also spend the next rung's money. The loop always waits.
     local _a0 _ael; _a0=$(date +%s)
-    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    OSRC_NO_AUTODETACH=1 "$SCRIPT_PATH" $([ "${OSRC_SPEND_OK:-0}" = 1 ] && echo --spend-ok) "$verb" -m "${RUNGS[$rung]}" "$aprompt" > "$ldir/attempt-$attempt.out" 2>&1 || true
+    _osrc_loop_needs_approval escalate "$lid" "$ldir" "$attempt" "${OSRC_SPEND_NEXT:-$0 --spend-ok loop escalate}" && { state="needs-approval"; last_attempt=$(( attempt - 1 )); break; }
     _ael=$(( $(date +%s) - _a0 ))
     local _skip_check=0 _result=fail cout="" crc=0
     if grep -aq '\[auto-detach\]' "$ldir/attempt-$attempt.out" 2>/dev/null; then
@@ -18604,7 +18604,7 @@ $feedback"
   esac
   echo "[loop escalate] $lid final: $state  ·  attempts + check output + receipts in $ldir" >&2
   echo "$state"
-  case "$state" in success) return 0 ;; blocked) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
+  case "$state" in success) return 0 ;; blocked|needs-approval) return 3 ;; *) return 2 ;; esac   # max_turns/max_time share 2: both mean "ran out of room, not converged"
 }
 
 # ---- software factory (0.14.0): plan/task graph, done contract + land gate, flows ----
@@ -18687,7 +18687,7 @@ main() {
   # from its own normalized argv inside cmd_bg; session start inserts after `start`.
   if [ -z "${OSRC_SPEND_NEXT:-}" ]; then
     case "$cmd" in
-      run|explore|research|edit|yolo|fanout) _osrc_spend_next_build "$cmd" ;;
+      run|explore|research|edit|yolo|fanout) _osrc_spend_next_build "$cmd" ;; loop) _osrc_spend_next_build "${1:-loop}" ;;
       bg)   _osrc_spend_next_build bg "$@" ;;
       session) [ "${1:-}" = "start" ] && _osrc_spend_next_build start ;;
     esac

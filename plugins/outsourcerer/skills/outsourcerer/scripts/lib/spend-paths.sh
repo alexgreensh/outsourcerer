@@ -87,17 +87,45 @@ _osrc_take_spend_ok() {
     [ "$a" = -- ] && dd=1; _OSRC_ARGS+=("$a")
   done
 }
-# _osrc_loop_needs_approval <shape> <lid> <attempt.out> <next> -> rc0 when the attempt never ran
+# _osrc_loop_needs_approval <shape> <lid> <ldir> <attempt> <next> -> rc0 when the attempt never ran
 # because a spend/cap gate refused it (its EVENT approval line, or the fail-closed lib refusal).
-# The loop then stops as needs-approval with one EVENT + NEXT: no check graded, no attempt burnt,
-# no escalation, no receipt for a run that did not launch (live-test F5).
+# The loop then stops as needs-approval with one EVENT + NEXT: no check graded, no attempt counted
+# (resume re-runs it), no escalation, no receipt for a run that did not launch (live-test F5).
 _osrc_loop_needs_approval() {
-  local ev; ev="$(grep -a '^EVENT approval ' "$3" 2>/dev/null | tail -1)"
-  [ -n "$ev" ] || grep -aq 'spend/cap gate library .* missing or damaged' "$3" 2>/dev/null || return 1
-  [ -n "$ev" ] || ev="EVENT approval loop $(date +%s) spend gate library damaged"
-  echo "[loop $1] $2: the attempt was not launched — a spend/cap gate needs your approval (nothing was spent; no attempt counted). Approve with --spend-ok on the loop: each attempt's consent binds to that attempt's own lane/model." >&2
-  printf 'needs approval: %s\n' "${ev#EVENT approval }" > "$(dirname "$3")/last_fail" 2>/dev/null || true
-  _osrc_event approval "loop:$2" "${ev#EVENT approval * * }" "$4" spend
+  local out="$3/attempt-$4.out" ev
+  ev="$(grep -a '^EVENT approval ' "$out" 2>/dev/null | tail -1)"
+  [ -n "$ev" ] || grep -aq 'spend/cap gate library .* missing or damaged' "$out" 2>/dev/null || return 1
+  [ -n "$ev" ] || ev="EVENT approval loop 0 spend gate library damaged"
+  echo "[loop $1] $2: attempt $4 was not launched: a spend/cap gate needs your approval (nothing spent, no attempt counted). Approve with --spend-ok on the loop; each attempt's consent binds to that attempt's own lane/model." >&2
+  printf 'needs approval: %s\n' "${ev#EVENT approval * * }" > "$3/last_fail" 2>/dev/null || true
+  printf '%s\n' "$(( $4 - 1 ))" > "$3/attempt" 2>/dev/null || true
+  _osrc_event approval "loop:$2" "${ev#EVENT approval * * }" "$5" spend
+}
+
+# _osrc_fanout_preflight <verb> -> bg's route preflight (spend, cap, dispatch) once per distinct
+# provider|model the fanout members resolve to (same precedence as the launch loop: -m > --route >
+# agent frontmatter > lane default), BEFORE any job is minted. One refusal refuses the whole fanout
+# with its EVENT/NEXT, instead of "all N launched" and N exit-nonzero jobs (live-test F6). Reads the
+# caller's labels/a_model/a_prov/g_model/g_prov/route_spec. Pairs approved at an interactive prompt
+# consent their members (each member's marker binds to its own pair).
+_osrc_fanout_preflight() {
+  local verb="$1" i m p r seen=" " flag="${OSRC_SPEND_OK:-0}" asked=0
+  for i in "${!labels[@]}"; do
+    m="$g_model"; [ -z "$m" ] && [ -n "$route_spec" ] && m="$(_route_match "${labels[$i]}" "$route_spec")"
+    [ -z "$m" ] && m="${a_model[$i]}"
+    p="${g_prov:-${a_prov[$i]}}"
+    case "$seen" in *" ${p:-$PROVIDER}|$m "*) continue ;; esac; seen="$seen${p:-$PROVIDER}|$m "
+    local -a _pf_provider=() _pf_spend=() _pf_args=("$verb")
+    { [ -n "$p" ] || [ "${PROVIDER_EXPLICIT:-0}" = 1 ]; } && _pf_provider=(--provider "${p:-$PROVIDER}")
+    [ "$flag" = 1 ] && _pf_spend=(--spend-ok)
+    [ -n "$m" ] && _pf_args+=(-m "$m"); _pf_args+=("fanout preflight")
+    r="$(OSRC_SPEND_OK= OSRC_CLOUD_ACK=1 OUTSOURCERER_DEPTH=0 OSRC_PROVIDER_ARG="${OSRC_PROVIDER_ARG:-0}" OSRC_PROVIDER_INJECTED="$(( ${#_pf_provider[@]} / 2 ))" \
+         OSRC_SPEND_NEXT="${OSRC_SPEND_NEXT:-}" _osrc_bg_preflight "$SCRIPT_PATH")" \
+      || die "fanout: refusing to launch -- member ${labels[$i]} (${p:-$PROVIDER}${m:+ / $m}) failed the route preflight (spend/cap/dispatch, see above). Nothing was started."
+    [ "$(printf '%s' "$r" | cut -d'|' -f5)" = 1 ] && asked=1
+  done
+  [ "$asked" = 1 ] && OSRC_SPEND_OK=1
+  return 0
 }
 
 _OSRC_LIBEND_SPENDPATHS=1   # last line: the loader proves this lib loaded whole (_osrc_spend_libs_ok)
