@@ -33,11 +33,11 @@ dom() {   # <section>: the page checks in hub_rv_dom.js
 # srv_start <engine-script-body> -> a real hub_server.py on a free port with a fake engine; sets SRV_PORT,
 # SRV_TOK, SRV_HOME. The engine is a shell script that stands in for `outsourcerer.sh hub export`.
 SRV_N=0
-srv_start() {
-  SRV_N=$((SRV_N + 1)); SRV_HOME="$TMP/srv$SRV_N"; mkdir -p "$SRV_HOME/hub"; chmod 700 "$SRV_HOME/hub"
+srv_start() {   # SRV_TOK preset = use that token
+  SRV_N=$((SRV_N + 1)); SRV_HOME="${SRV_REUSE:-$TMP/srv$SRV_N}"; mkdir -p "$SRV_HOME/hub"; chmod 700 "$SRV_HOME/hub"
   printf '#!/bin/sh\n%s\n' "$1" > "$SRV_HOME/engine"; chmod +x "$SRV_HOME/engine"
   [ -z "${2:-}" ] || printf '%s\n' "$2" > "$SRV_HOME/hub/export.json"
-  SRV_TOK="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+  SRV_TOK="${SRV_TOK_SET:-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')}"
   OSRC_HUB_TOKEN="$SRV_TOK" python3 -I "$LIB/hub_server.py" --bind 127.0.0.1 --port 0 --page "$LIB/hub.html" \
     --engine "$SRV_HOME/engine" --osrc-home "$SRV_HOME" --no-open > "$SRV_HOME/out" 2> "$SRV_HOME/err" &
   PIDS="$PIDS $!"; SRV_PID=$!
@@ -276,6 +276,27 @@ PY
     r="$(OSRC_HOME="$SRV_HOME" OSRC_HUB_PORT="$SRV_PORT" lib eval 'nohup() { :; }; _osrc_mc_hub_reuse() { return 0; }; cmd_hub_mc' 2>&1)"
     case "$r" in *"Mission Control: http://127.0.0.1:$SRV_PORT/?t=$SRV_TOK"*) ok "F50: mc still finds and reuses its own hub" ;; *) no "F50: own hub not found: $r" ;; esac
   else no "F50: the hub did not start: $(cat "$SRV_HOME/err")"; fi
+fi
+
+if on F51; then
+  # Restarting with a new key must revoke old URLs within hours, and /reopen answers browsers only.
+  H51="$TMP/f51"; mkdir -p "$H51/hub"; chmod 700 "$H51/hub"
+  OLD=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; NEW=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  r="$(cd "$LIB" && T="$H51" python3 -I -c '
+import json, os, sys, time; sys.path.insert(0, os.getcwd()); import hub_server as h
+t = os.environ["T"]; h.Hub(t, "/bin/false", "hub.html", "'$OLD'"); hub = h.Hub(t, "/bin/false", "hub.html", "'$NEW'")
+fresh = hub.retired_key_ok("'$OLD'")
+ks = json.load(open(hub.keys_file)); [k.update(retired_at=int(time.time()) - 2 * 86400) for k in ks if not k.get("current")]
+json.dump(ks, open(hub.keys_file, "w")); print(fresh, hub.retired_key_ok("'$OLD'"), hub.KEY_TTL <= 86400)
+for k in ks: k.update(retired_at=int(time.time()) - 60) if not k.get("current") else None
+json.dump(ks, open(hub.keys_file, "w"))' 2>&1)"
+  [ "$r" = "True False True" ] && ok "F51: a key retired two days ago no longer reopens (TTL at most a day)" || no "F51: TTL: $r"
+  if SRV_REUSE="$H51" SRV_TOK_SET="$NEW" srv_start 'echo "{\"generated_at\":1,\"projects\":[]}"'; then
+    c1="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Hub-Old-Token: $OLD" "http://127.0.0.1:$SRV_PORT/reopen")"
+    c2="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "X-Hub-Old-Token: $OLD" -H "Origin: http://127.0.0.1:$SRV_PORT" -H "Sec-Fetch-Site: same-origin" "http://127.0.0.1:$SRV_PORT/reopen")"
+    [ "$c1" = 403 ] && ok "F51: /reopen without browser same-origin headers is refused" || no "F51: headerless /reopen answered $c1"
+    [ "$c2" = 200 ] && ok "F51: the page's own same-origin /reopen still works" || no "F51: same-origin /reopen answered $c2"
+  else no "F51: the hub did not start: $(cat "$SRV_HOME/err")"; fi
 fi
 
 echo "RESULTS: $pass pass $fail fail"

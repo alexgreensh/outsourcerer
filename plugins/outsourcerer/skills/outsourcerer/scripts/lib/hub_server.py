@@ -118,7 +118,9 @@ class Hub:
     # Keys this OSRC_HOME's hubs have served, as salted SHA-256 (never the key itself), in
     # hub/keys.json (0600): [{salt, hash, current, retired_at}]. A key stops being current when a hub
     # starts with a different one; it is accepted by /reopen for KEY_TTL after that, newest KEY_KEEP only.
-    KEY_TTL = 7 * 86400
+    # Hours, not days: a restart with a new key must soon revoke old URLs left in scrollback, shell
+    # history or a shared screenshot. A tab older than this reopens with `outsourcerer mc`.
+    KEY_TTL = 12 * 3600
     KEY_KEEP = 5
 
     @staticmethod
@@ -745,7 +747,8 @@ def make_handler(hub):
 
         def _reopen(self):
             # POST /reopen with X-Hub-Old-Token: a tab holding a key an earlier hub here served (and
-            # retired within 7 days) gets the current page URL. Same-origin POST only, loopback Host
+            # retired within KEY_TTL, 12 h) gets the current page URL. A browser POST from this server's own
+            # page only (Origin or Sec-Fetch-Site must say so: curl and scripts send neither), loopback Host
             # (do_POST). A script with no old key, or an unknown one, gets 403 and nothing else.
             if not hub.retired_key_ok((self.headers.get("X-Hub-Old-Token") or "").strip()):
                 return self._send_json(self.REOPEN_DENIED, 403)
@@ -813,7 +816,8 @@ def make_handler(hub):
 
         def do_POST(self):
             if urllib.parse.urlparse(self.path).path == "/reopen":
-                if not self._host_ok() or not self._post_origin_ok():
+                sfs = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+                if not self._host_ok() or not self._post_origin_ok() or not (self.headers.get("Origin") or sfs == "same-origin"):
                     return self._deny()
                 return self._reopen()
             if not self._host_ok() or not self._token_ok() or not self._post_origin_ok():

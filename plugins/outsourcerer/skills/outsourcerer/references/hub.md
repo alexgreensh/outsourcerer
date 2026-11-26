@@ -209,7 +209,7 @@ says whether the page is live: `Live · updated 12s ago`, or the reason a call f
 last good data, or `Waiting for Mission Control (11s)` past 10 s, or `Not live: this tab's key is from an
 older Mission Control`. In that last case the main pane explains it and carries a **Reopen** button, which
 POSTs the tab's old key to `/reopen`. The hub keeps salted SHA-256 hashes of the keys it served in
-`hub/keys.json` (0600, newest 5, a retired key is honoured for 7 days) and answers with the current page
+`hub/keys.json` (0600, newest 5, a retired key is honoured for 12 hours, and only to a same-origin browser request) and answers with the current page
 URL only for a key it retired; no key, an unknown key or the current key gets 403 and the "run outsourcerer
 mc" text. `GET /reopen` is always 403. The strip also lists needs-you rows from the export (`alerts`: a lane
 still stalled after its autonudge, a READY lane queued 15+ min with its age) and `No watcher for N min`
