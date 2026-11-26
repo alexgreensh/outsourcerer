@@ -252,7 +252,7 @@ _osrc_hub_decisions() {
     | map(. + {id:(.id // ""), status:(.status // "wait"), weight:(.weight // "Medium"),
                options:(.options // []), affects:(if (.affects | type) == "array" then .affects elif (.affects | type) == "string" then [.affects] else [] end), q:(.q // .short // ""),
                short:(.short // .q // "")})
-    | to_entries | map(.value + {id:(.value.id // ("D" + ((.key+1)|tostring)))}) | map(del(.key))' \
+    | to_entries | map((.value.id // "") as $i | .value + {id:(if $i == "" then "D\(.key + 1)" else $i end)})' \
     "$f" 2>/dev/null || printf '[]'
 }
 

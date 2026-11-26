@@ -191,5 +191,13 @@ if on F43; then
   [ ! -d "$OSRC_HOME/hub/cache/scr/.dlock" ] && ok "F43: the worker lock is released" || no "F43: lock left behind"
 fi
 
+if on F44; then
+  # Decisions written without ids get D1, D2...: answerable (the server's id regex) and distinct in the DOM.
+  mkdir -p "$OSRC_HOME/hub/decisions"
+  echo '{"decisions":[{"q":"First?"},{"q":"Second?"},{"id":"keep","q":"Third?"},{"id":"","q":"Fourth?"}]}' > "$OSRC_HOME/hub/decisions/s44.json"
+  ids="$(lib _osrc_hub_decisions s44 | jq -c '[.[].id]')"
+  [ "$ids" = '["D1","D2","keep","D4"]' ] && ok "F44: id-less decisions get D1, D2...; a given id is kept" || no "F44: ids $ids"
+fi
+
 echo "RESULTS: $pass pass $fail fail"
 [ "$fail" -eq 0 ]
