@@ -31,9 +31,19 @@ _osrc_disk_conf() { sed -n "s/^$1=//p" "$(_osrc_disk_dir)/settings" 2>/dev/null 
 
 _osrc_disk_vol_kb() { df -kP "$OSRC_HOME" 2>/dev/null | awk 'NR==2 {print $2}'; }
 
-# _osrc_disk_gb_kb <n> -> KB for a non-negative integer GB, or "" when not a plain integer.
+# _osrc_disk_gb_kb <n> -> KB for a whole number of GB (at most 7 digits, capped at 1,000,000 GB so
+# the product never wraps), or "" when not one: the caller uses the default, `disk status` names it.
 _osrc_disk_gb_kb() {
-  case "${1:-}" in ''|*[!0-9]*) printf '' ;; *) printf '%s' "$(( $1 * 1048576 ))" ;; esac
+  case "${1:-}" in ''|*[!0-9]*|????????*) printf '' ;;
+    *) local g=$(( 10#$1 )); [ "$g" -le 1000000 ] || g=1000000; printf '%s' "$(( g * 1048576 ))" ;; esac
+}
+
+_osrc_disk_rejected() { # -> "NAME=value ..." for each floor setting the floors ignored
+  local n v out=""
+  for n in OSRC_DISK_MIN_GB OSRC_DISK_PAUSE_GB OSRC_DISK_CRITICAL_GB; do
+    v="$(_osrc_disk_conf "$n")"; [ -n "$v" ] && [ -z "$(_osrc_disk_gb_kb "$v")" ] && out="$out $n=$v"
+  done
+  printf '%s' "${out# }"
 }
 
 # _osrc_disk_floors_kb -> "<launch_kb> <pause_kb> <crit_kb>". The critical floor stays when
@@ -104,6 +114,8 @@ _osrc_disk_report_oneline() {
 _osrc_disk_report() {
   local items="${1:-}" top
   printf 'disk %s\n' "$(_osrc_disk_report_oneline)"
+  top="$(_osrc_disk_rejected)"
+  [ -z "$top" ] || printf 'settings rejected (not a whole number of GB, at most 7 digits), default used: %s\n' "$top"
   top="$(_timeout 20 du -sk "$OSRC_HOME"/* 2>/dev/null | sort -rn | head -3 | awk '{n=$2; sub(/.*\//,"",n); printf "%s=%sK ", n, $1}')"
   printf 'top under OSRC_HOME: %s\n' "${top:-none}"
   have jq 2>/dev/null || return 0
@@ -223,10 +235,21 @@ _osrc_disk_records() {
 _osrc_disk_any_paused() { [ -n "$(_osrc_disk_records)" ]; }
 _osrc_disk_recorded_pids() { _osrc_disk_records | while IFS= read -r f; do awk -F'|' '$1=="proc"{print $3}' "$f" 2>/dev/null; done; }
 
-# _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact.
+# _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact; 2 when a
+# record already exists (another sweep paused it first). The record is created exclusively (a hard
+# link of the complete temp file; noclobber + rename where links are unsupported), so two overlapping
+# sweeps never overwrite each other's record: the loser's mv -f used to replace the winner's list
+# with only the pids the winner had not listed, leaving those SIGSTOPped with no record naming them.
 _osrc_disk_rec_write() {
-  printf '%s' "$2" > "$1.${_OSRC_DISK_ME:-$$}" 2>/dev/null && mv -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null && [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
-  rm -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null; return 1
+  local t="$1.${_OSRC_DISK_ME:-$$}"
+  printf '%s' "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; return 1; }
+  if ! ln "$t" "$1" 2>/dev/null; then
+    [ -e "$1" ] && { rm -f "$t" 2>/dev/null; return 2; }
+    { ( set -C; : > "$1" ) 2>/dev/null || { rm -f "$t" 2>/dev/null; [ -e "$1" ] && return 2; return 1; }; } && mv -f "$t" "$1" 2>/dev/null
+  fi
+  rm -f "$t" 2>/dev/null
+  [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
+  rm -f "$1" 2>/dev/null; return 1
 }
 
 _osrc_disk_log() { printf '%s disk-policy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(_osrc_disk_dir)/monitor.log" 2>/dev/null || true; }
@@ -294,7 +317,8 @@ _osrc_disk_pause_job() {
     c="${c}proc|s|$spid|0|$sid"$'\n'
   fi
   _osrc_disk_rec_busy "$c" && { _osrc_disk_log "deferred pause of $jd: it holds a lock or runs git"; return 4; }
-  _osrc_disk_rec_write "$jd/disk-paused" "$c" || { _osrc_disk_log "cannot record pause of $jd; left running"; return 3; }
+  _osrc_disk_rec_write "$jd/disk-paused" "$c"; q=$?; [ "$q" = 2 ] && return 1
+  [ "$q" = 0 ] || { _osrc_disk_log "cannot record pause of $jd; left running"; return 3; }
   _osrc_disk_stop_rec "$jd/disk-paused"
   _osrc_disk_held && { _osrc_disk_resume_rec "$jd/disk-paused"; return 1; }
   _osrc_disk_keepalive "$jd" "paused under the disk pause floor; resumes automatically when space returns, or now: $0 disk resume"
@@ -374,7 +398,8 @@ _osrc_disk_pause_reg() {
   esac
   _osrc_disk_rec_busy "$c" && { _osrc_disk_log "deferred pause of $key: it holds a lock or runs git"; return 4; }
   _mkdir_private "$(_osrc_disk_dir)/paused" >/dev/null 2>&1
-  _osrc_disk_rec_write "$(_osrc_disk_dir)/paused/$key" "$c" || { _osrc_disk_log "cannot record pause of $key; left running"; return 3; }
+  _osrc_disk_rec_write "$(_osrc_disk_dir)/paused/$key" "$c"; q=$?; [ "$q" = 2 ] && return 1
+  [ "$q" = 0 ] || { _osrc_disk_log "cannot record pause of $key; left running"; return 3; }
   _osrc_disk_stop_rec "$(_osrc_disk_dir)/paused/$key"
   _osrc_disk_held && { _osrc_disk_resume_rec "$(_osrc_disk_dir)/paused/$key"; return 1; }
   return 0
@@ -549,11 +574,10 @@ _osrc_disk_reclaim_lane() {
        || [ "$(git -C "$pp" rev-parse -q --verify HEAD 2>/dev/null)" != "$sha" ]; then
       _osrc_disk_log "kept $pp: live HEAD is not the receipt branch at the proven commit"; printf 0; return 0
     fi
-    if ! k="$(git -C "$pp" status --porcelain --ignored --untracked-files=all 2>/dev/null)" || [ -n "$k" ]; then
-      _osrc_disk_log "kept $pp: untracked or ignored content (review: $0 cleanup)"; printf 0; return 0
-    fi
-    git -C "$repo" worktree remove "$pp" >/dev/null 2>&1 || { printf 0; return 0; }
-    _osrc_disk_cl_log removed-worktree "$pp"; n=$((n+1))
+    _osrc_wt_remove "$repo" "$pp" disk-policy; k=$?
+    [ "$k" = 2 ] && _osrc_disk_log "kept $pp: untracked or ignored content (review: $0 cleanup)"
+    [ "$k" = 0 ] || { printf 0; return 0; }
+    n=$((n+1))
   fi
   if [ -n "$(printf '%s\n' "$items" | jq -r --arg s "$s" --arg b "$br" 'select(.session==$s and .kind=="branch" and .path==$b) | .path' 2>/dev/null)" ] \
      && ! _osrc_branch_checked_out "$repo" "$br" \
@@ -782,6 +806,16 @@ _osrc_disk_target_paused() {
   case "${1:-}" in ''|*/*) return 1 ;; esac
   [ -f "$OSRC_JOBS/$1/disk-paused" ] && grep -q '^since|' "$OSRC_JOBS/$1/disk-paused" 2>/dev/null && return 0
   [ -f "$(_osrc_disk_dir)/paused/tmux-$1" ]
+}
+
+_osrc_disk_pause_since() { sed -n 's/^since|//p' "$OSRC_JOBS/$1/disk-paused" "$(_osrc_disk_dir)/paused/tmux-$1" 2>/dev/null | head -1; }
+
+# _osrc_disk_paused_note <id> -> the one line status, the hub and supervise show for a disk-paused lane.
+_osrc_disk_paused_note() {
+  local l p c
+  _osrc_disk_target_paused "${1:-}" || return 1
+  read -r l p c <<<"$(_osrc_disk_floors_kb 2>/dev/null)"
+  printf 'Paused: disk below %s (pause floor); SIGSTOPped, resumes when space returns, or now: %s disk resume' "$(_osrc_disk_fmt_kb "$p")" "$0"
 }
 
 # _osrc_disk_session_gate <session args...> — the disk gate for `session`: start and model switch

@@ -178,6 +178,7 @@ _osrc_hub_lane_state() {
   else
     return 1
   fi
+  case "$st" in done|failed) ;; *) _osrc_disk_target_paused "$id" 2>/dev/null && st=limit ;; esac   # SIGSTOPped: disk pause floor
   local dsf; dsf="$(_osrc_hub_done_state "$id")"
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "lstate.$id.dsf"
   [ "$dsf" = done ] && st=done

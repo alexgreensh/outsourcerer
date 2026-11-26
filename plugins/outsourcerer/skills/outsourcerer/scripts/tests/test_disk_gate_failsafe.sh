@@ -229,7 +229,7 @@ osrc "$H" '_osrc_disk_resume_all >/dev/null'
 echo "=== CC F7: supervise reports a disk-paused job as paused, never stalled ==="
 H="$(home f7s)"; mkdir -p "$H/jobs/job7"; echo 'stalled?' > "$H/jobs/job7/status"; printf 'since|%s\n' "$(date +%s)" > "$H/jobs/job7/disk-paused"
 r="$(osrc "$H" '_reconcile_status() { echo "stalled?"; }; _sv_observe job7 "$(date +%s)"; echo "k=[$SV_K] out=$SV_OUT"')"
-grep -q 'k=\[\] out=1' <<<"$r" && ok "no stalled event for a disk-paused job, still owed a waiter" || bad "paused job observed as: $r"
+grep -q 'k=\[disk-paused\] out=1' <<<"$r" && ok "a disk-paused job is reported paused (never stalled), still owed a waiter" || bad "paused job observed as: $r"
 rm -f "$H/jobs/job7/disk-paused"
 r="$(osrc "$H" '_reconcile_status() { echo "stalled?"; }; _sv_observe job7 "$(date +%s)"; echo "k=[$SV_K]"')"
 grep -q 'k=\[stalled\]' <<<"$r" && ok "the same job unpaused still reports stalled" || bad "control case: $r"

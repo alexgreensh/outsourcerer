@@ -118,6 +118,7 @@ _osrc_hub_lane_job() { # <id> -> lane json or nothing
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "${reason:-$st}")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
+  [ "$mstat" = Building ] && local pn && pn="$(_osrc_disk_paused_note "$id" 2>/dev/null)" && { mstat=Blocked; note="$pn"; }
   local short="${task_ref:-}"
   [ -n "$short" ] || short="${lane:-$prov} ${verb:-run} ${id##*-}"
   jq -cn --arg id "$id" --arg short "$short" --arg status "$mstat" --arg pct "$mpct" \
@@ -151,6 +152,7 @@ _osrc_hub_lane_session() { # <id> -> lane json or nothing (tmux/autodetach targe
   local mapped; mapped="$(_osrc_hub_lane_status "$st" "" "$note")"
   local mstat="${mapped%%|*}"; mapped="${mapped#*|}"; local mpct="${mapped%%|*}"; note="${mapped#*|}"
   note="$(_osrc_hub_note "$note")"
+  [ "$mstat" = Building ] && local pn && pn="$(_osrc_disk_paused_note "$id" 2>/dev/null)" && { mstat=Blocked; note="$pn"; }
   type _osrc_hub_prof >/dev/null 2>&1 && _osrc_hub_prof "ls.$id.jq0"
   jq -cn --arg id "$id" --arg short "$id" --arg status "$mstat" --arg pct "$mpct" \
     --arg note "$note" --arg model "$model" --arg sess "$id" --arg ll "${_OSRC_LL:-}" \
