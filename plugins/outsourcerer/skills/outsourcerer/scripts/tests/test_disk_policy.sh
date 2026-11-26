@@ -232,7 +232,7 @@ t="$(tick 3145728)"
 ! stopped "$SUP" && [ ! -f "$JD/disk-paused" ] && ok "canceled job: supervisor resumed, then record retired" || bad "supervisor stranded: $(pstat "$SUP")"
 t="$(tick 8388608)"
 # P1: the record must be durable BEFORE any SIGSTOP.
-t="$(setfree 3145728; osrc "$JH" 'mv() { return 1; }; _osrc_disk_monitor_tick')"
+t="$(setfree 3145728; osrc "$JH" 'ln() { return 1; }; mv() { return 1; }; _osrc_disk_monitor_tick')"
 ! stopped "$D2" && [ ! -f "$J2/disk-paused" ] && ok "no record -> job left running" || bad "stopped without a durable record"
 grep -q 'could not be verified' "$JH/wake-queue.jsonl" && ok "owner told some lanes keep running" || bad "unrecorded job not reported"
 t="$(tick 8388608)"; t="$(tick 3145728)"

@@ -7,6 +7,8 @@
 #   1. typed `cleanup --apply` deleted a merged worktree whose ignored node_modules/ held a .env
 #      (the verdict sees only the collapsed '!! node_modules/' line and calls the cache disposable)
 #   2. merged-lane reclaim removed a worktree even when its deletion could not be logged
+#   4. two overlapping pause sweeps: the second overwrote the first's record, so the first's
+#      SIGSTOPped processes were named by no record and never resumed (a test_disk_policy hang)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -68,6 +70,23 @@ fixture late; lane late
 # An ignored file lands after the scan said SAFE (a lane writing .env while reclaim runs).
 n="$(osrc "$H" 'items="$(_osrc_cleanup_items --no-size)"; echo TOKEN=1 > "'"$R"'/.outsourcerer/worktrees/late/.env"; _osrc_disk_reclaim "$items"')"
 [ -f "$R/.outsourcerer/worktrees/late/.env" ] && ok "ignored file written after the scan is kept" || bad "late .env deleted (n=$n)"
+
+echo "=== 4: overlapping pause sweeps never overwrite each other's record ==="
+# Two sweeps both saw no record for a lane; the second listed only the pids the first had not.
+# Its write must lose, or the first sweep's SIGSTOPped processes are named by no record.
+fixture race; D="$H/disk-policy/paused"; mkdir -p "$D"
+sleep 300 & P1=$!; sleep 300 & P2=$!; disown "$P1" "$P2" 2>/dev/null
+out="$(osrc "$H" 'A="since|1
+proc|d|'"$P1"'|0|$(_pid_start_identity '"$P1"')
+"; B="since|2
+proc|d|'"$P2"'|0|$(_pid_start_identity '"$P2"')
+"
+  _osrc_disk_rec_write "$OSRC_HOME/disk-policy/paused/fg-1" "$A"; echo "a=$?"
+  _osrc_disk_rec_write "$OSRC_HOME/disk-policy/paused/fg-1" "$B"; echo "b=$?"')"
+grep -q 'a=0' <<<"$out" && grep -q 'b=2' <<<"$out" && ok "the second record write reports an existing record" || bad "rec_write: $out"
+grep -q "proc|d|$P1|" "$D/fg-1" && ! grep -q "proc|d|$P2|" "$D/fg-1" && ok "the first sweep's record survives intact" || bad "record overwritten: $(cat "$D/fg-1")"
+[ -z "$(ls "$D" | grep -v '^fg-1$')" ] && ok "no temp file left behind" || bad "debris: $(ls "$D")"
+kill "$P1" "$P2" 2>/dev/null
 
 echo ""
 echo "RESULTS: $pass passed, $fail failed"

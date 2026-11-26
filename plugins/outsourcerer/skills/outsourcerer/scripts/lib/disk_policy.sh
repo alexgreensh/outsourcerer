@@ -235,10 +235,21 @@ _osrc_disk_records() {
 _osrc_disk_any_paused() { [ -n "$(_osrc_disk_records)" ]; }
 _osrc_disk_recorded_pids() { _osrc_disk_records | while IFS= read -r f; do awk -F'|' '$1=="proc"{print $3}' "$f" 2>/dev/null; done; }
 
-# _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact.
+# _osrc_disk_rec_write <file> <content> -> 0 only when the record reads back intact; 2 when a
+# record already exists (another sweep paused it first). The record is created exclusively (a hard
+# link of the complete temp file; noclobber + rename where links are unsupported), so two overlapping
+# sweeps never overwrite each other's record: the loser's mv -f used to replace the winner's list
+# with only the pids the winner had not listed, leaving those SIGSTOPped with no record naming them.
 _osrc_disk_rec_write() {
-  printf '%s' "$2" > "$1.${_OSRC_DISK_ME:-$$}" 2>/dev/null && mv -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null && [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
-  rm -f "$1.${_OSRC_DISK_ME:-$$}" "$1" 2>/dev/null; return 1
+  local t="$1.${_OSRC_DISK_ME:-$$}"
+  printf '%s' "$2" > "$t" 2>/dev/null || { rm -f "$t" 2>/dev/null; return 1; }
+  if ! ln "$t" "$1" 2>/dev/null; then
+    [ -e "$1" ] && { rm -f "$t" 2>/dev/null; return 2; }
+    { ( set -C; : > "$1" ) 2>/dev/null || { rm -f "$t" 2>/dev/null; [ -e "$1" ] && return 2; return 1; }; } && mv -f "$t" "$1" 2>/dev/null
+  fi
+  rm -f "$t" 2>/dev/null
+  [ "$(cat "$1" 2>/dev/null)" = "$(printf '%s' "$2")" ] && return 0
+  rm -f "$1" 2>/dev/null; return 1
 }
 
 _osrc_disk_log() { printf '%s disk-policy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$(_osrc_disk_dir)/monitor.log" 2>/dev/null || true; }
@@ -306,7 +317,8 @@ _osrc_disk_pause_job() {
     c="${c}proc|s|$spid|0|$sid"$'\n'
   fi
   _osrc_disk_rec_busy "$c" && { _osrc_disk_log "deferred pause of $jd: it holds a lock or runs git"; return 4; }
-  _osrc_disk_rec_write "$jd/disk-paused" "$c" || { _osrc_disk_log "cannot record pause of $jd; left running"; return 3; }
+  _osrc_disk_rec_write "$jd/disk-paused" "$c"; q=$?; [ "$q" = 2 ] && return 1
+  [ "$q" = 0 ] || { _osrc_disk_log "cannot record pause of $jd; left running"; return 3; }
   _osrc_disk_stop_rec "$jd/disk-paused"
   _osrc_disk_held && { _osrc_disk_resume_rec "$jd/disk-paused"; return 1; }
   _osrc_disk_keepalive "$jd" "paused under the disk pause floor; resumes automatically when space returns, or now: $0 disk resume"
@@ -386,7 +398,8 @@ _osrc_disk_pause_reg() {
   esac
   _osrc_disk_rec_busy "$c" && { _osrc_disk_log "deferred pause of $key: it holds a lock or runs git"; return 4; }
   _mkdir_private "$(_osrc_disk_dir)/paused" >/dev/null 2>&1
-  _osrc_disk_rec_write "$(_osrc_disk_dir)/paused/$key" "$c" || { _osrc_disk_log "cannot record pause of $key; left running"; return 3; }
+  _osrc_disk_rec_write "$(_osrc_disk_dir)/paused/$key" "$c"; q=$?; [ "$q" = 2 ] && return 1
+  [ "$q" = 0 ] || { _osrc_disk_log "cannot record pause of $key; left running"; return 3; }
   _osrc_disk_stop_rec "$(_osrc_disk_dir)/paused/$key"
   _osrc_disk_held && { _osrc_disk_resume_rec "$(_osrc_disk_dir)/paused/$key"; return 1; }
   return 0
