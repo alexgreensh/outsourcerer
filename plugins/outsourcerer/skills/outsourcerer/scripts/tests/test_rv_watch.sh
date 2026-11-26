@@ -99,6 +99,20 @@ grep -q 'lane record unreadable' <<<"$e1" && [ -z "$e2" ] && [ -n "$e3" ] \
 [ "$(rv 'osrc_remote_state broken1')" = failed ] && ok "osrc_remote_state reports it failed" || bad "state: [$(rv 'osrc_remote_state broken1')]"
 rm -f "$RH/remote/broken1.json"
 
+echo "=== F25: READY then a RESULT with a failing rc is failed, not queued for review ==="
+rv "OSRC_NOW=$NOW0 cmd_lane add rcfail --branch cloud/rcfail --repo '$REMOTE'" >/dev/null
+rv "OSRC_NOW=$NOW0 cmd_lane add rcok --branch cloud/rcok --repo '$REMOTE'" >/dev/null
+rpush cloud/rcfail "early marker" 'echo "READY rcfail" > rcfail.READY' >/dev/null
+rpush cloud/rcok "early marker" 'echo "READY rcok" > rcok.READY' >/dev/null
+rv "OSRC_NOW=$((NOW0+300)) osrc_remote_events" >/dev/null
+rpush cloud/rcfail "hand in" 'printf "sha=0000000\nrc=2\nconformance red\n" > rcfail.RESULT' >/dev/null
+rpush cloud/rcok "hand in" 'printf "sha=0000000\nrc=0\nall green\n" > rcok.RESULT' >/dev/null
+o="$(rv "OSRC_NOW=$((NOW0+400)) osrc_remote_events")"
+grep -q '^EVENT failed rcfail .*rcfail.RESULT reports rc=2' <<<"$o" && ! grep -q '^EVENT done rcfail .*queued for review' <<<"$o" \
+  && ok "a failing RESULT emits failed, no review queued" || bad "rcfail events: $o"
+[ "$(rv 'osrc_remote_state rcfail')" = failed ] && ok "osrc_remote_state rcfail is failed" || bad "state: $(rv 'osrc_remote_state rcfail')"
+grep -q '^EVENT done rcok .*queued for review' <<<"$o" && ok "a RESULT with rc=0 is still READY for review" || bad "rcok events: $o"
+
 echo
 echo "passed: $pass  failed: $fail"
 [ "$fail" -eq 0 ]

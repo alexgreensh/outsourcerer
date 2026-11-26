@@ -256,10 +256,18 @@ _osrc_lane_poll_locked() { # <id> <json> <now>
     else tree="$(git --git-dir="$cache" ls-tree --name-only "$head" 2>/dev/null)"; fi
     grep -qxF "$id.READY" <<<"$tree" && grep -qxF "$id.RESULT" <<<"$tree" && ready=true
   fi
+  # A READY head whose own RESULT reports a failing rc is a failed lane, not one to review.
+  local rrc=""
+  if [ "$ready" = true ]; then
+    if [ "$transport" = gh ]; then rrc="$(_osrc_net gh api -H 'Accept: application/vnd.github.raw' "repos/$url/contents/$id.RESULT?ref=$head" 2>/dev/null)"
+    else rrc="$(git --git-dir="$cache" show "$head:$id.RESULT" 2>/dev/null)"; fi
+    rrc="$(sed -n '2s/^rc=\([0-9][0-9]*\).*/\1/p' <<<"$rrc")"
+    if [ -z "$rrc" ] || [ "$rrc" -eq 0 ] 2>/dev/null; then rrc=""; else ready=false; fi
+  fi
   sha7="${head:0:7}"
   _osrc_jq_set "$f" --arg head "$head" --arg msg "$(printf '%s' "$msg" | head -1 | cut -c1-160)" \
-    --argjson now "$now" --argjson ready "$ready" \
-    '.head=$head | .head_msg=$msg | .last_push_ts=$now | .head_ready=$ready'
+    --argjson now "$now" --argjson ready "$ready" --arg rrc "$rrc" \
+    '.head=$head | .head_msg=$msg | .last_push_ts=$now | .head_ready=$ready | .result_rc=$rrc'
   # a push invalidates reviews of older heads, whether or not the new head is READY
   type _osrc_review_supersede >/dev/null 2>&1 && _osrc_review_supersede "$id" "$head"
   if [ "$ready" = true ]; then
@@ -414,11 +422,11 @@ osrc_remote_state() { # <id> -> live|ready|done|failed|gone  (cache only: no net
 # \037 separates; tabs and newlines inside values become spaces.
 _osrc_remote_rec() { # <json>
   IFS=$'\037' read -r _RR_head _RR_errn _RR_errk _RR_del _RR_chead _RR_cstate _RR_crc _RR_proofb _RR_hready _RR_readyh \
-    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref < <(jq -r 'def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");
+    _RR_pbranch _RR_msg _RR_seen _RR_created _RR_lastpoll _RR_lastpush _RR_ref _RR_rrc < <(jq -r 'def c: (if type == "string" then . else tojson end) | gsub("[\t\n\u001f]"; " ");
     [(.head // ""), (.err_count // 0), (.err_kind // ""), (.branch_deleted // false), (.check.head // ""), (.check.state // ""),
      (.check.rc // 0), (.proof_back // ""), (.head_ready // false), (.ready_head // ""), (.poll_branch // .branch // ""),
      (.head_msg // ""), (.seen_branch // false), (.created_ts // 0), (.last_poll_ts // 0), (.last_push_ts // .created_ts // 0),
-     (.session_ref // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
+     (.session_ref // ""), (.result_rc // "")] | map(c) | join("\u001f")' "$1" 2>/dev/null) || return 1
   _RR_errn="${_RR_errn:-0}"; _RR_crc="${_RR_crc:-0}"
   case "$_RR_created" in ''|*[!0-9]*) _RR_created=0 ;; esac; case "$_RR_lastpush" in ''|*[!0-9]*) _RR_lastpush="$_RR_created" ;; esac
 }
@@ -432,6 +440,7 @@ _osrc_remote_state_rec() { # <id>: osrc_remote_state from the _RR_* record
   [ "$_RR_del" = true ] && { printf failed; return 0; }
   [ "$_RR_chead" = "$_RR_head" ] && ch_state="$_RR_cstate"
   if [ "$ch_state" = done ] && [ "$_RR_crc" != 0 ]; then printf failed; return 0; fi
+  [ -z "$_RR_rrc" ] || { printf failed; return 0; }   # the head's RESULT reports a failing rc
   [ -z "$_RR_head" ] || [ "$_RR_proofb" != "$_RR_head" ] || { printf live; return 0; }   # sent back for proof
   if [ "$_RR_hready" = true ]; then
     [ "$ch_state" != running ] || { printf live; return 0; }     # done-when check still running
@@ -479,6 +488,9 @@ osrc_remote_events() {
     if [ -n "$head" ] && [ "$_RR_chead" = "$head" ] && [ "$_RR_cstate" = done ] \
        && [ "$_RR_crc" != 0 ] && _osrc_ev_due "$id" "checkfail:$head" "$renotify"; then
       _osrc_emit failed "$id" "done-when check failed on $sha7 (rc=$_RR_crc$(jq -r '.check.why // "" | if . == "" then "" else ", " + . end' "$f")), no review spent; log $(jq -r '.check.log' "$f")$(type osrc_proof_remote_note >/dev/null 2>&1 && osrc_proof_remote_note "$id")" "$(nx=""; ! type osrc_proof_remote_next >/dev/null 2>&1 || nx="$(osrc_proof_remote_next "$id")"; [ -n "$nx" ] && printf '%s' "$nx" || printf 'tail -40 %q' "$(jq -r '.check.log' "$f")")"
+    fi
+    if [ -n "$head" ] && [ -n "$_RR_rrc" ] && _osrc_ev_due "$id" "resultrc:$head" 0; then
+      _osrc_emit failed "$id" "READY $sha7 on $_RR_pbranch, but its $id.RESULT reports rc=$_RR_rrc: not queued for review" "$(_osrc_self) lane show $id"
     fi
     if [ -n "$head" ] && [ "$_RR_proofb" = "$head" ] && _osrc_ev_due "$id" "proofback:$head" "$renotify"; then
       _osrc_emit failed "$id" "READY $sha7 not reviewed: $(osrc_proof_gate "$id" "$head")$(osrc_proof_remote_note "$id")" "$(osrc_proof_remote_next "$id")"
